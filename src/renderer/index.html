@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>API Monitor</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body, #root { width: 100%; height: 100%; background: transparent; }
+      /* settings 页深色兜底：在 JS/CSS 加载前就生效 */
+      html.settings-pre, html.settings-pre body, html.settings-pre #root {
+        background: #101014 !important;
+        color: #f0f0f0;
+      }
+    </style>
+    <script>
+      // 在任何模块脚本执行前检测页面类型，立即设深色背景
+      if (new URLSearchParams(location.search).get('page') === 'settings') {
+        document.documentElement.classList.add('settings-pre');
+        document.documentElement.style.background = '#101014';
+        document.documentElement.style.color = '#f0f0f0';
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

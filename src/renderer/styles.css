@@ -1,0 +1,119 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  --bg: rgba(18, 18, 24, 0.92);
+  --bg-hover: rgba(30, 30, 40, 0.95);
+  --border: rgba(255, 255, 255, 0.08);
+  --text-primary: #f0f0f0;
+  --text-secondary: #8a8a9a;
+  --text-dim: #5a5a6a;
+  --accent: #7c6ff7;
+  --accent-dim: rgba(124, 111, 247, 0.2);
+  --warn: #f59e42;
+  --danger: #ef4444;
+  --danger-bg: rgba(239, 68, 68, 0.15);
+  --green: #22c55e;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  font-family: -apple-system, 'Segoe UI', sans-serif;
+  font-size: 12px;
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* settings 窗口：body/html 本身也要深色，防止 React 还没 mount 时白底 */
+body.settings-mode,
+body.settings-mode #root {
+  background: #101014;
+}
+
+/* 悬浮窗页面：锁死溢出，保持无滚动条 */
+.app-page-floating {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* 设置页：允许纵向滚动 */
+.app-page-settings {
+  width: 100%;
+  min-height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: #101014;
+}
+
+.app-page-settings::-webkit-scrollbar {
+  width: 4px;
+}
+.app-page-settings::-webkit-scrollbar-track {
+  background: transparent;
+}
+.app-page-settings::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 2px;
+}
+
+button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: inherit;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+button:hover {
+  color: var(--text-primary);
+}
+
+.icon-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  transition: background 0.15s, color 0.15s;
+}
+
+.icon-btn:hover {
+  background: rgba(255,255,255,0.08);
+  color: var(--text-primary);
+}
+
+.tooltip-container {
+  position: relative;
+}
+
+.tooltip-container:hover .tooltip {
+  opacity: 1;
+  pointer-events: none;
+}
+
+.tooltip {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.85);
+  color: #fff;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+  z-index: 999;
+}

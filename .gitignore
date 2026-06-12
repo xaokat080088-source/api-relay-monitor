@@ -1,0 +1,27 @@
+# dependencies / build artifacts
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# logs
+*.log
+
+# env
+.env
+.env.*
+
+# local user data (do not commit real credentials / history)
+settings.json
+history.json
+session.json
+*.local.json
+*.db
+*.sqlite
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
