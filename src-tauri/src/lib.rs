@@ -41,7 +41,7 @@ pub fn run() {
 
             let win = WebviewWindowBuilder::new(app, "floating", float_url)
                 .title("API Monitor")
-                .inner_size(240.0, 320.0)
+                .inner_size(240.0, 232.0)
                 .position(x as f64, y as f64)
                 .decorations(false)
                 .transparent(true)
@@ -83,6 +83,10 @@ pub fn run() {
             commands::hide_window,
             commands::set_always_on_top,
             commands::move_window,
+            commands::move_window_smooth,
+            commands::get_window_position,
+            commands::get_primary_monitor_size,
+            commands::get_cursor_position,
             commands::notify_low_balance,
             commands::open_settings_window,
             commands::close_settings_window,

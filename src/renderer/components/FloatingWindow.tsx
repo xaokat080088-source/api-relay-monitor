@@ -140,6 +140,11 @@ export default function FloatingWindow() {
   const [error, setError] = useState<string | null>(null)
   const [errorStatus, setErrorStatus] = useState<BalanceSnapshot['status'] | null>(null)
   const dragRef = useRef<{ sx: number; sy: number; wx: number; wy: number } | null>(null)
+  const [docked, setDocked] = useState<'none' | 'top' | 'left' | 'right'>('none')
+  const [expanded, setExpanded] = useState(true)
+  const [animating, setAnimating] = useState(false)
+  const animatingRef = useRef(false)
+  const dockedPosRef = useRef<{ normalX: number; normalY: number; dockedX: number; dockedY: number } | null>(null)
 
   // 统一入口：重新从 Rust 读最新 settings，然后刷新数据
   // 所有刷新路径（启动、按钮、事件、托盘）都走这里，避免闭包持有旧 settings
@@ -220,25 +225,160 @@ export default function FloatingWindow() {
   const handleRefresh = useCallback(() => refreshWithLatestSettings(), [refreshWithLatestSettings])
 
   const handleDragStart = useCallback((e: React.MouseEvent) => {
+    // 动画播放期间禁止拖拽
+    if (animatingRef.current) return
+    // 手动拖动时先解除 docked 状态，避免旧的收起记录干扰
+    setDocked('none')
+    setExpanded(true)
+    dockedPosRef.current = null
     dragRef.current = {
       sx: e.screenX, sy: e.screenY,
       wx: window.screenX, wy: window.screenY,
     }
     const onMove = (ev: MouseEvent) => {
       if (!dragRef.current) return
-      tauriAPI.moveWindow(
-        dragRef.current.wx + ev.screenX - dragRef.current.sx,
-        dragRef.current.wy + ev.screenY - dragRef.current.sy,
-      )
+      const newX = dragRef.current.wx + ev.screenX - dragRef.current.sx
+      const newY = dragRef.current.wy + ev.screenY - dragRef.current.sy
+      tauriAPI.moveWindow(newX, newY)
     }
-    const onUp = () => {
+    const onUp = async () => {
       dragRef.current = null
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
+      // 拖拽结束后检测是否贴边
+      await checkAndDock()
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
   }, [])
+
+  // 检测是否贴边并收起
+  const checkAndDock = useCallback(async () => {
+    if (animatingRef.current) return
+    try {
+      const [x, y] = await tauriAPI.getWindowPosition()
+      const [screenW, screenH] = await tauriAPI.getPrimaryMonitorSize()
+      const EDGE_THRESHOLD = 20
+      const WINDOW_WIDTH = 240
+      const WINDOW_HEIGHT = 232
+      const VISIBLE_WIDTH = 10  // 贴边时露出的宽度
+
+      let newDocked: typeof docked = 'none'
+      // 展开位置：clamp 到屏幕内，保证展开后窗口完整可见
+      let normalX = Math.max(0, Math.min(x, screenW - WINDOW_WIDTH))
+      let normalY = Math.max(0, Math.min(y, screenH - WINDOW_HEIGHT))
+      let dockedX = normalX
+      let dockedY = normalY
+
+      if (y <= EDGE_THRESHOLD) {
+        // 贴顶：展开位置贴到 y=0，收起时向上收只露出底部 10px
+        newDocked = 'top'
+        normalY = 0
+        dockedX = normalX
+        dockedY = -(WINDOW_HEIGHT - VISIBLE_WIDTH)
+      } else if (x <= EDGE_THRESHOLD) {
+        // 贴左：展开位置贴到 x=0，收起时向左收只露出右侧 10px
+        newDocked = 'left'
+        normalX = 0
+        dockedX = -(WINDOW_WIDTH - VISIBLE_WIDTH)
+        dockedY = normalY
+      } else if (x + WINDOW_WIDTH >= screenW - EDGE_THRESHOLD) {
+        // 贴右：展开位置贴到右边缘，收起时向右收只露出左侧 10px
+        newDocked = 'right'
+        normalX = screenW - WINDOW_WIDTH
+        dockedX = screenW - VISIBLE_WIDTH
+        dockedY = normalY
+      }
+
+      if (newDocked !== 'none') {
+        dockedPosRef.current = { normalX, normalY, dockedX, dockedY }
+        setDocked(newDocked)
+        setExpanded(false)
+        // 平滑收起动画（200ms），动画期间锁定交互
+        animatingRef.current = true
+        setAnimating(true)
+        await tauriAPI.moveWindowSmooth(dockedX, dockedY, 200)
+        animatingRef.current = false
+        setAnimating(false)
+      } else {
+        setDocked('none')
+        setExpanded(true)
+        dockedPosRef.current = null
+      }
+    } catch (e) {
+      console.error('[Dock] check failed:', e)
+      animatingRef.current = false
+      setAnimating(false)
+    }
+  }, [docked])
+
+  // 轮询全局光标位置，靠近屏幕边缘时展开，鼠标离开时重新收起
+  useEffect(() => {
+    if (docked === 'none') return
+
+    const WINDOW_WIDTH = 240
+    const WINDOW_HEIGHT = 232
+    const TRIGGER_MARGIN = 3       // 屏幕边缘触发区（露出的 10px 也算）
+    const VISIBLE_WIDTH = 10
+    const LEAVE_PADDING = 40       // 鼠标离开窗口多远后收起
+
+    let expandedNow = false
+
+    const tick = async () => {
+      // 动画播放中不做任何检测，避免竞态导致卡在中间位置
+      if (!dockedPosRef.current || animatingRef.current) return
+      const { normalX, normalY, dockedX, dockedY } = dockedPosRef.current
+      try {
+        const [cx, cy] = await tauriAPI.getCursorPosition()
+        const [screenW] = await tauriAPI.getPrimaryMonitorSize()
+
+        if (!expandedNow) {
+          // 收起状态：检测鼠标是否触到屏幕边缘 / 露出条
+          let hit = false
+          if (docked === 'top') {
+            hit = cy <= (VISIBLE_WIDTH + TRIGGER_MARGIN)
+              && cx >= normalX && cx <= normalX + WINDOW_WIDTH
+          } else if (docked === 'left') {
+            hit = cx <= (VISIBLE_WIDTH + TRIGGER_MARGIN)
+              && cy >= normalY && cy <= normalY + WINDOW_HEIGHT
+          } else if (docked === 'right') {
+            hit = cx >= screenW - (VISIBLE_WIDTH + TRIGGER_MARGIN)
+              && cy >= normalY && cy <= normalY + WINDOW_HEIGHT
+          }
+          if (hit) {
+            expandedNow = true
+            animatingRef.current = true
+            setAnimating(true)
+            setExpanded(true)
+            await tauriAPI.moveWindowSmooth(normalX, normalY, 150)
+            animatingRef.current = false
+            setAnimating(false)
+          }
+        } else {
+          // 展开状态：鼠标离开窗口范围（含 padding）则收起
+          const inside =
+            cx >= normalX - LEAVE_PADDING &&
+            cx <= normalX + WINDOW_WIDTH + LEAVE_PADDING &&
+            cy >= normalY - LEAVE_PADDING &&
+            cy <= normalY + WINDOW_HEIGHT + LEAVE_PADDING
+          if (!inside) {
+            expandedNow = false
+            animatingRef.current = true
+            setAnimating(true)
+            setExpanded(false)
+            await tauriAPI.moveWindowSmooth(dockedX, dockedY, 200)
+            animatingRef.current = false
+            setAnimating(false)
+          }
+        }
+      } catch {
+        animatingRef.current = false
+      }
+    }
+
+    const timer = setInterval(tick, 120)
+    return () => clearInterval(timer)
+  }, [docked])
 
   // 优先用 snapshot，无 snapshot 时降级用 record 旧字段
   const wallet = snapshot?.wallet
@@ -295,6 +435,8 @@ export default function FloatingWindow() {
       overflow: 'hidden',
       userSelect: 'none',
       boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+      // 动画播放期间锁定所有交互，动画结束后才能点击/拖动
+      pointerEvents: animating ? 'none' : 'auto',
     }}>
 
       {/* ── Header ── */}

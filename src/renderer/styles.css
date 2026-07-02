@@ -37,10 +37,21 @@ body.settings-mode #root {
   background: #101014;
 }
 
-/* 悬浮窗页面：锁死溢出，保持无滚动条 */
+/* 悬浮窗页面：内容自适应高度，多余窗口区域完全透明，避免底部黑影 */
 .app-page-floating {
   width: 100%;
-  height: 100%;
+  height: auto;
+  overflow: hidden;
+}
+/* floating 页让 root 高度贴合内容，不撑满窗口，消除底部黑影 */
+body.floating-mode,
+body.floating-mode #root {
+  height: auto;
+  background: transparent;
+}
+/* floating 页禁止任何滚动条：内容超出部分不滚动 */
+html.floating-mode,
+body.floating-mode {
   overflow: hidden;
 }
 

@@ -54,6 +54,11 @@ export const tauriAPI = {
   hideWindow: () => invoke<void>('hide_window'),
   setAlwaysOnTop: (onTop: boolean) => invoke<void>('set_always_on_top', { onTop }),
   moveWindow: (x: number, y: number) => invoke<void>('move_window', { x, y }),
+  moveWindowSmooth: (targetX: number, targetY: number, durationMs: number) =>
+    invoke<void>('move_window_smooth', { targetX, targetY, durationMs }),
+  getWindowPosition: () => invoke<[number, number]>('get_window_position'),
+  getPrimaryMonitorSize: () => invoke<[number, number]>('get_primary_monitor_size'),
+  getCursorPosition: () => invoke<[number, number]>('get_cursor_position'),
   notifyLowBalance: (balance: number) => invoke<void>('notify_low_balance', { balance }),
   openSettingsWindow: () => invoke<void>('open_settings_window'),
   closeSettingsWindow: () => invoke<void>('close_settings_window'),

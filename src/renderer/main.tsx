@@ -7,6 +7,8 @@ import './styles.css'
 const isSettings = new URLSearchParams(window.location.search).get('page') === 'settings'
 if (isSettings) {
   document.body.classList.add('settings-mode')
+} else {
+  document.body.classList.add('floating-mode')
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

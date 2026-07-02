@@ -75,6 +75,57 @@ pub fn move_window(app: AppHandle, x: i32, y: i32) {
 }
 
 #[command]
+pub async fn move_window_smooth(app: AppHandle, target_x: i32, target_y: i32, duration_ms: u64) {
+    if let Some(win) = app.get_webview_window("floating") {
+        if let Ok(current_pos) = win.outer_position() {
+            let (start_x, start_y) = (current_pos.x, current_pos.y);
+            let steps = (duration_ms / 16).max(1); // 60fps
+            let dx = (target_x - start_x) as f64 / steps as f64;
+            let dy = (target_y - start_y) as f64 / steps as f64;
+
+            for i in 1..=steps {
+                let x = start_x + (dx * i as f64) as i32;
+                let y = start_y + (dy * i as f64) as i32;
+                let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+                tokio::time::sleep(tokio::time::Duration::from_millis(16)).await;
+            }
+
+            // 确保最终位置精确
+            let _ = win.set_position(tauri::PhysicalPosition::new(target_x, target_y));
+        }
+    }
+}
+
+#[command]
+pub fn get_window_position(app: AppHandle) -> Result<(i32, i32), String> {
+    if let Some(win) = app.get_webview_window("floating") {
+        win.outer_position()
+            .map(|p| (p.x, p.y))
+            .map_err(|e| e.to_string())
+    } else {
+        Err("floating window not found".to_string())
+    }
+}
+
+#[command]
+pub fn get_primary_monitor_size(app: AppHandle) -> Result<(u32, u32), String> {
+    app.primary_monitor()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no primary monitor".to_string())
+        .map(|m| {
+            let size = m.size();
+            (size.width, size.height)
+        })
+}
+
+#[command]
+pub fn get_cursor_position(app: AppHandle) -> Result<(i32, i32), String> {
+    app.cursor_position()
+        .map(|p| (p.x as i32, p.y as i32))
+        .map_err(|e| e.to_string())
+}
+
+#[command]
 pub fn close_settings_window(app: AppHandle) {
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.close();
