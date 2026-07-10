@@ -3,7 +3,8 @@ import {
   Save, Eye, EyeOff, RefreshCw, Trash2,
   CheckCircle, XCircle, Wifi, X, ExternalLink, AlertCircle,
 } from 'lucide-react'
-import { AppSettings, DEFAULT_SETTINGS } from '../types'
+import { Plus } from 'lucide-react'
+import { AppSettings, DEFAULT_SETTINGS, StationProfile, ProviderType, makeDefaultProfile } from '../types'
 import { balanceService } from '../services/balanceService'
 import { historyStore } from '../services/historyStore'
 import { tauriAPI } from '../services/tauriAPI'
@@ -78,7 +79,10 @@ interface TestResult {
 // ── 主组件 ────────────────────────────────────────────────────
 
 export default function SettingsWindow() {
-  const [s, setS] = useState<AppSettings>(DEFAULT_SETTINGS)
+  // 全局设置（含 profiles 数组 + activeProfileId + 全局字段）
+  const [g, setG] = useState<AppSettings>(DEFAULT_SETTINGS)
+  // 当前正在编辑的 profile id
+  const [editingId, setEditingId] = useState<string>('')
   const [loaded, setLoaded] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [showCookie, setShowCookie] = useState(false)
@@ -91,35 +95,38 @@ export default function SettingsWindow() {
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<TestResult | null>(null)
 
+  // 当前编辑中的 profile
+  const editing: StationProfile | undefined = g.profiles.find((p) => p.id === editingId)
+
   // ── 加载设置 ──────────────────────────────────────────────
 
   const reload = useCallback(async () => {
     try {
-      console.log('[Settings] mount')
       const [raw, sysAutostart] = await Promise.all([
         tauriAPI.getSettings(),
         tauriAPI.getAutostartEnabled().catch(() => null),
       ])
-      console.log('[Settings] loaded settings keys:', Object.keys(raw).join(', '))
+      const profiles = (raw.profiles && raw.profiles.length > 0)
+        ? raw.profiles
+        : DEFAULT_SETTINGS.profiles
+      const activeProfileId = profiles.some((p) => p.id === raw.activeProfileId)
+        ? raw.activeProfileId
+        : profiles[0].id
       const settings: AppSettings = {
-        ...DEFAULT_SETTINGS,
-        ...raw,
-        providerType: (raw.providerType === 'xiaoma' ? 'xiaoma' : 'mock'),
-        baseUrl: raw.baseUrl || DEFAULT_SETTINGS.baseUrl,
-        cookie: raw.cookie ?? '',
-        apiToken: raw.apiToken ?? '',
-        newApiUser: raw.newApiUser ?? '',
+        profiles,
+        activeProfileId,
         debugMode: Boolean(raw.debugMode),
         refreshInterval: Number(raw.refreshInterval) || DEFAULT_SETTINGS.refreshInterval,
         lowBalanceThreshold: Number(raw.lowBalanceThreshold) ?? DEFAULT_SETTINGS.lowBalanceThreshold,
         enableNotification: Boolean(raw.enableNotification ?? DEFAULT_SETTINGS.enableNotification),
         alwaysOnTop: Boolean(raw.alwaysOnTop ?? DEFAULT_SETTINGS.alwaysOnTop),
-        // 以系统真实状态为准，读取失败降级用持久化值
         autoLaunch: sysAutostart !== null ? sysAutostart : Boolean(raw.autoLaunch ?? false),
         windowX: raw.windowX ?? -1,
         windowY: raw.windowY ?? -1,
       }
-      setS(settings)
+      setG(settings)
+      // 默认编辑当前激活的 profile
+      setEditingId(activeProfileId)
       setLoaded(true)
       setLoadError('')
     } catch (e) {
@@ -133,17 +140,64 @@ export default function SettingsWindow() {
     reload()
   }, [reload])
 
-  const update = (patch: Partial<AppSettings>) => setS((prev) => ({ ...prev, ...patch }))
+  // 更新全局字段
+  const updateGlobal = (patch: Partial<AppSettings>) => setG((prev) => ({ ...prev, ...patch }))
+
+  // 更新当前编辑 profile 的字段
+  const updateProfile = (patch: Partial<StationProfile>) => {
+    setG((prev) => ({
+      ...prev,
+      profiles: prev.profiles.map((p) => (p.id === editingId ? { ...p, ...patch } : p)),
+    }))
+  }
+
+  // ── Profile 管理 ──────────────────────────────────────────
+
+  const handleAddProfile = () => {
+    const np: StationProfile = {
+      ...makeDefaultProfile(),
+      name: `中转站 ${g.profiles.length + 1}`,
+      providerType: 'xiaoma',
+    }
+    setG((prev) => ({ ...prev, profiles: [...prev.profiles, np] }))
+    setEditingId(np.id)
+    setTestResult(null)
+  }
+
+  const handleDeleteProfile = () => {
+    if (g.profiles.length <= 1) return
+    const remain = g.profiles.filter((p) => p.id !== editingId)
+    const nextActive = g.activeProfileId === editingId ? remain[0].id : g.activeProfileId
+    setG((prev) => ({ ...prev, profiles: remain, activeProfileId: nextActive }))
+    setEditingId(remain[0].id)
+    setTestResult(null)
+    // 清掉被删 profile 的历史文件（可选，忽略失败）
+    tauriAPI.clearHistory(editingId).catch(() => {})
+  }
+
+  const switchEditing = (id: string) => {
+    setEditingId(id)
+    setTestResult(null)
+    setShowCookie(false)
+    setShowToken(false)
+  }
+
+  const setActive = (id: string) => {
+    updateGlobal({ activeProfileId: id })
+  }
 
   // ── 登录状态文案 ──────────────────────────────────────────
 
   function authStatusInfo(): { text: string; color: string; icon: React.ReactNode } {
-    if (!loaded) return { text: '读取中…', color: '#5a5a6a', icon: null }
-    if (!s.cookie && !s.apiToken) {
-      return { text: '未配置 Cookie', color: '#f59e42', icon: <XCircle size={12} /> }
+    if (!loaded || !editing) return { text: '读取中…', color: '#5a5a6a', icon: null }
+    if (editing.providerType === 'mock') {
+      return { text: 'Mock 示例数据，无需认证', color: '#8a8a9a', icon: <AlertCircle size={12} /> }
+    }
+    if (!editing.cookie && !editing.apiToken) {
+      return { text: '未配置认证信息', color: '#f59e42', icon: <XCircle size={12} /> }
     }
     return {
-      text: s.cookie ? '已填写 Cookie（未验证）' : '已填写 API Token（未验证）',
+      text: editing.apiToken ? '已填写 Token（未验证）' : '已填写 Cookie（未验证）',
       color: '#8a8a9a',
       icon: <AlertCircle size={12} />,
     }
@@ -154,56 +208,35 @@ export default function SettingsWindow() {
   // ── 打开官网 ──────────────────────────────────────────────
 
   const handleOpenWeb = () => {
-    const url = (s.baseUrl || '').trim()
+    const url = (editing?.baseUrl || '').trim()
     if (url) tauriAPI.openUrl(url)
   }
 
   // ── 清除 Cookie ───────────────────────────────────────────
 
   const handleClearCookie = async () => {
-    await tauriAPI.clearSessionCookie()
-    update({ cookie: '', apiToken: '' })
+    updateProfile({ cookie: '', apiToken: '' })
     setTestResult(null)
-    await tauriAPI.broadcastSettingsChanged()
   }
 
   // ── 测试连接（走 Rust 后端，绕过渲染进程 CORS）─────────────
 
   const handleTest = async () => {
+    if (!editing) return
     setTesting(true)
     setTestResult(null)
 
-    const effectiveCookie = s.cookie?.trim() || ''
-    const effectiveToken = s.apiToken?.trim() || ''
+    const effectiveCookie = editing.cookie?.trim() || ''
+    const effectiveToken = editing.apiToken?.trim() || ''
+    const effectiveNewApiUser = editing.newApiUser?.trim() || ''
+    const baseUrl = (editing.baseUrl || '').trim()
 
     try {
-      if (!effectiveCookie && !effectiveToken) {
-        setTestResult({ ok: false, error: 'Cookie 未填写，请先粘贴 Cookie 再测试', errorType: 'COOKIE' })
+      if (editing.providerType === 'mock') {
+        setTestResult({ ok: true, balance: 0, totalCost: 0, requestCount: 0, logCount: 0 })
         return
       }
 
-      // Cookie 格式校验：必须含 =
-      if (effectiveCookie && !effectiveCookie.includes('=')) {
-        setTestResult({
-          ok: false,
-          error: 'Cookie 格式不正确，请使用 session=xxx 的格式，不要只粘贴值',
-          errorType: 'COOKIE',
-        })
-        return
-      }
-
-      // New-Api-User 校验
-      const effectiveNewApiUser = s.newApiUser?.trim() || ''
-      if (s.providerType === 'xiaoma' && !effectiveNewApiUser && !effectiveToken) {
-        setTestResult({
-          ok: false,
-          error: '部分中转站接口需要 New-Api-User 请求头，请从浏览器 Network 请求头中复制（见下方引导）',
-          errorType: 'AUTH',
-        })
-        return
-      }
-
-      const baseUrl = (s.baseUrl || '').trim()
       if (!baseUrl) {
         setTestResult({
           ok: false,
@@ -212,13 +245,49 @@ export default function SettingsWindow() {
         })
         return
       }
-      const snap = await tauriAPI.xiaomaFetch(
-        baseUrl,
-        effectiveCookie,
-        effectiveToken || null,
-        effectiveNewApiUser || null,
-        s.debugMode ?? false,
-      )
+
+      let snap
+      if (editing.providerType === 'jizhi') {
+        // 极智：Bearer JWT 认证，填在 API Token 字段
+        if (!effectiveToken) {
+          setTestResult({
+            ok: false,
+            error: '极智 API 需要 Bearer Token，请把 Authorization 里的 JWT 填到 API Token 字段',
+            errorType: 'AUTH',
+          })
+          return
+        }
+        snap = await tauriAPI.jizhiFetch(baseUrl, effectiveToken, effectiveCookie || null, g.debugMode ?? false)
+      } else {
+        // xiaoma / New-API 系列：Cookie + New-Api-User
+        if (!effectiveCookie && !effectiveToken) {
+          setTestResult({ ok: false, error: 'Cookie 未填写，请先粘贴 Cookie 再测试', errorType: 'COOKIE' })
+          return
+        }
+        if (effectiveCookie && !effectiveCookie.includes('=')) {
+          setTestResult({
+            ok: false,
+            error: 'Cookie 格式不正确，请使用 session=xxx 的格式，不要只粘贴值',
+            errorType: 'COOKIE',
+          })
+          return
+        }
+        if (!effectiveNewApiUser && !effectiveToken) {
+          setTestResult({
+            ok: false,
+            error: '部分中转站接口需要 New-Api-User 请求头，请从浏览器 Network 请求头中复制（见下方引导）',
+            errorType: 'AUTH',
+          })
+          return
+        }
+        snap = await tauriAPI.xiaomaFetch(
+          baseUrl,
+          effectiveCookie,
+          effectiveToken || null,
+          effectiveNewApiUser || null,
+          g.debugMode ?? false,
+        )
+      }
 
       const dbg = {
         debugUrl: snap.debugUrl ?? undefined,
@@ -322,11 +391,15 @@ export default function SettingsWindow() {
   // ── 保存 ──────────────────────────────────────────────────
 
   const handleSave = async () => {
-    const { _sessionCookie: _, ...toSave } = s as AppSettings & { _sessionCookie?: string }
-    const result = await tauriAPI.saveSettings(toSave as AppSettings)
-    setS(result)
+    // 剥离运行时字段 _sessionCookie
+    const cleanProfiles: StationProfile[] = g.profiles.map(({ _sessionCookie: _sc, ...p }) => p)
+    const toSave: AppSettings = { ...g, profiles: cleanProfiles }
+    const result = await tauriAPI.saveSettings(toSave)
+    setG(result)
+    if (!result.profiles.some((p) => p.id === editingId) && result.profiles[0]) {
+      setEditingId(result.profiles[0].id)
+    }
     tauriAPI.setAlwaysOnTop(result.alwaysOnTop)
-    // 同步系统开机自启动状态
     try {
       await tauriAPI.setAutostartEnabled(result.autoLaunch)
       setAutostartError('')
@@ -342,8 +415,9 @@ export default function SettingsWindow() {
   }
 
   const handleClearHistory = async () => {
+    if (!editing) return
     setClearing(true)
-    await historyStore.clear()
+    await historyStore.clear(editing.id)
     setClearing(false)
   }
 
@@ -395,32 +469,94 @@ export default function SettingsWindow() {
         API Monitor 设置
       </div>
 
-      {/* ── 数据来源 ── */}
+      {/* ── 中转站管理 ── */}
       <div style={sec()}>
-        <SectionTitle title="数据来源" />
-        <Row label="Provider">
+        <SectionTitle title="中转站管理" />
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+          {g.profiles.map((p) => {
+            const isEditing = p.id === editingId
+            const isActive = p.id === g.activeProfileId
+            return (
+              <button
+                key={p.id}
+                onClick={() => switchEditing(p.id)}
+                style={{
+                  ...btnBase,
+                  padding: '5px 10px',
+                  background: isEditing ? 'rgba(124,111,247,0.22)' : 'rgba(255,255,255,0.05)',
+                  border: `1px solid ${isActive ? 'rgba(124,111,247,0.6)' : 'rgba(255,255,255,0.1)'}`,
+                  color: isEditing ? '#a89ff9' : '#c0c0cc',
+                }}
+                title={isActive ? '当前正在监控此中转站' : '点击编辑'}
+              >
+                {isActive && <CheckCircle size={11} style={{ color: '#4ade80' }} />}
+                {p.name || '未命名'}
+              </button>
+            )
+          })}
+          <button
+            onClick={handleAddProfile}
+            style={{
+              ...btnBase,
+              padding: '5px 10px',
+              background: 'rgba(34,197,94,0.1)',
+              border: '1px dashed rgba(34,197,94,0.4)',
+              color: '#4ade80',
+            }}
+          >
+            <Plus size={12} /> 添加中转站
+          </button>
+        </div>
+
+        {editing && editingId !== g.activeProfileId && (
+          <button
+            onClick={() => setActive(editingId)}
+            style={{
+              ...btnBase, marginBottom: 10,
+              background: 'rgba(124,111,247,0.15)',
+              border: '1px solid rgba(124,111,247,0.4)',
+              color: '#a89ff9',
+            }}
+          >
+            <CheckCircle size={12} /> 设为当前监控（保存后生效）
+          </button>
+        )}
+
+        <Row label="配置名称">
+          <input
+            style={inputStyle}
+            value={editing?.name ?? ''}
+            onChange={(e) => updateProfile({ name: e.target.value })}
+            placeholder="例如：小马API、极智API"
+          />
+        </Row>
+        <Row label="适配器类型">
           <select
-            value={s.providerType}
-            onChange={(e) => update({ providerType: e.target.value as 'mock' | 'xiaoma' })}
+            value={editing?.providerType ?? 'mock'}
+            onChange={(e) => updateProfile({ providerType: e.target.value as ProviderType })}
             style={{ ...inputStyle, cursor: 'pointer' }}
           >
             <option value="mock">Mock（本地假数据）</option>
-            <option value="xiaoma">示例适配器（New API / One API 兼容）</option>
+            <option value="xiaoma">小马 / New API / One API（Cookie 认证）</option>
+            <option value="jizhi">极智 API（jizhiapi.site，Token 认证）</option>
           </select>
         </Row>
-        <Row label="中转站地址">
-          <input
-            style={inputStyle}
-            value={s.baseUrl}
-            onChange={(e) => update({ baseUrl: e.target.value })}
-            placeholder="https://example.com"
-          />
-        </Row>
+        {editing?.providerType !== 'mock' && (
+          <Row label="中转站地址">
+            <input
+              style={inputStyle}
+              value={editing?.baseUrl ?? ''}
+              onChange={(e) => updateProfile({ baseUrl: e.target.value })}
+              placeholder={editing?.providerType === 'jizhi' ? 'https://jizhiapi.site' : 'https://example.com'}
+            />
+          </Row>
+        )}
       </div>
 
-      {/* ── 认证 Cookie ── */}
+      {/* ── 认证 ── */}
+      {editing && editing.providerType !== 'mock' && (
       <div style={sec()}>
-        <SectionTitle title="认证 Cookie" />
+        <SectionTitle title={editing.providerType === 'jizhi' ? '认证 Token' : '认证 Cookie'} />
 
         {/* 状态提示 */}
         <div style={{
@@ -435,15 +571,15 @@ export default function SettingsWindow() {
           </span>
         </div>
 
-        {/* Cookie 输入框 */}
+        {/* Cookie 输入框（极智不需要 Cookie，可留空） */}
         <Row label="Cookie">
           <div style={{ position: 'relative' }}>
             <input
               style={{ ...inputStyle, paddingRight: 30, fontFamily: 'monospace' }}
               type={showCookie ? 'text' : 'password'}
-              value={s.cookie}
-              onChange={(e) => update({ cookie: e.target.value })}
-              placeholder="session=xxx; token=yyy"
+              value={editing.cookie}
+              onChange={(e) => updateProfile({ cookie: e.target.value })}
+              placeholder={editing.providerType === 'jizhi' ? '极智无需 Cookie，可留空' : 'session=xxx; token=yyy'}
               autoComplete="off"
               spellCheck={false}
             />
@@ -459,19 +595,21 @@ export default function SettingsWindow() {
             </button>
           </div>
           <div style={{ fontSize: 10, color: '#5a5a6a', marginTop: 4 }}>
-            请填写完整 Cookie，例如 <code>session=你的值</code>，不要只粘贴 value
+            {editing.providerType === 'jizhi'
+              ? '极智 API 用下方 API Token 认证，此项可留空'
+              : <>请填写完整 Cookie，例如 <code>session=你的值</code>，不要只粘贴 value</>}
           </div>
         </Row>
 
-        {/* API Token（可选） */}
+        {/* API Token */}
         <Row label="API Token">
           <div style={{ position: 'relative' }}>
             <input
               style={{ ...inputStyle, paddingRight: 30, fontFamily: 'monospace' }}
               type={showToken ? 'text' : 'password'}
-              value={s.apiToken}
-              onChange={(e) => update({ apiToken: e.target.value })}
-              placeholder="Bearer Token（可选）"
+              value={editing.apiToken}
+              onChange={(e) => updateProfile({ apiToken: e.target.value })}
+              placeholder={editing.providerType === 'jizhi' ? '粘贴 Authorization 里的 Bearer JWT（必填）' : 'Bearer Token（可选）'}
               autoComplete="off"
               spellCheck={false}
             />
@@ -486,23 +624,30 @@ export default function SettingsWindow() {
               {showToken ? <EyeOff size={12} /> : <Eye size={12} />}
             </button>
           </div>
+          {editing.providerType === 'jizhi' && (
+            <div style={{ fontSize: 10, color: '#5a5a6a', marginTop: 4 }}>
+              F12 → 网络 → 打开 <code>/api/v1/auth/me</code> 请求 → 请求标头里 <code>Authorization: Bearer</code> 后面那一长串
+            </div>
+          )}
         </Row>
 
-        {/* New-Api-User */}
-        <Row label="New-Api-User">
-          <input
-            style={{ ...inputStyle, fontFamily: 'monospace' }}
-            type="text"
-            value={s.newApiUser}
-            onChange={(e) => update({ newApiUser: e.target.value })}
-            placeholder="从浏览器 Network 请求头中复制 New-Api-User"
-            autoComplete="off"
-            spellCheck={false}
-          />
-          <div style={{ fontSize: 10, color: '#5a5a6a', marginTop: 4 }}>
-            部分中转站（New API / One API 系）接口需要这个请求头，否则返回"未提供 New-Api-User"
-          </div>
-        </Row>
+        {/* New-Api-User（极智不需要） */}
+        {editing.providerType !== 'jizhi' && (
+          <Row label="New-Api-User">
+            <input
+              style={{ ...inputStyle, fontFamily: 'monospace' }}
+              type="text"
+              value={editing.newApiUser}
+              onChange={(e) => updateProfile({ newApiUser: e.target.value })}
+              placeholder="从浏览器 Network 请求头中复制 New-Api-User"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <div style={{ fontSize: 10, color: '#5a5a6a', marginTop: 4 }}>
+              部分中转站（New API / One API 系）接口需要这个请求头，否则返回"未提供 New-Api-User"
+            </div>
+          </Row>
+        )}
 
         {/* 操作按钮 */}
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
@@ -536,7 +681,7 @@ export default function SettingsWindow() {
             {testing ? '正在测试连接…' : '测试连接'}
           </button>
 
-          {(s.cookie || s.apiToken) && (
+          {(editing.cookie || editing.apiToken) && (
             <button
               onClick={handleClearCookie}
               style={{
@@ -547,7 +692,7 @@ export default function SettingsWindow() {
               }}
             >
               <X size={12} />
-              清除 Cookie
+              清除认证
             </button>
           )}
         </div>
@@ -623,8 +768,11 @@ export default function SettingsWindow() {
           </div>
         )}
       </div>
+      )}
 
-      {/* ── Cookie 获取引导 ── */}
+      {/* ── Cookie 获取引导（仅 Cookie 认证类中转站显示）── */}
+      {editing && editing.providerType === 'xiaoma' && (
+      <>
       <div style={sec()}>
         <SectionTitle title="如何获取 Cookie" />
         <div style={{
@@ -686,6 +834,39 @@ export default function SettingsWindow() {
           仅 New API / One API 系站点需要。如果中转站不要求该请求头，可以留空。
         </div>
       </div>
+      </>
+      )}
+
+      {/* ── 极智 API 获取引导（仅极智显示）── */}
+      {editing && editing.providerType === 'jizhi' && (
+      <div style={sec()}>
+        <SectionTitle title="如何获取极智 API Token" />
+        <div style={{
+          fontSize: 11, color: '#8a8a9a', lineHeight: 2,
+          background: 'rgba(255,255,255,0.03)',
+          border: '1px solid rgba(255,255,255,0.06)',
+          borderRadius: 6, padding: '10px 12px',
+        }}>
+          <ol style={{ margin: 0, paddingLeft: 18 }}>
+            <li>浏览器登录 <code style={{ color: '#f0c040' }}>https://jizhiapi.site</code></li>
+            <li>按 F12 打开开发者工具，切到 <code style={{ color: '#f0c040' }}>网络</code> / Network</li>
+            <li>刷新页面（F5），在搜索框输入 <code style={{ color: '#f0c040' }}>me</code></li>
+            <li>点击 <code style={{ color: '#f0c040' }}>/api/v1/auth/me</code> 请求 → 请求标头</li>
+            <li>找到 <code style={{ color: '#f0c040' }}>Authorization</code>，复制 <code style={{ color: '#f0c040' }}>Bearer</code> 后面那一长串（JWT）</li>
+            <li>粘贴到上方 API Token 框，点击保存，再测试连接</li>
+          </ol>
+        </div>
+        <div style={{
+          marginTop: 8, fontSize: 10, color: '#5a5a6a',
+          padding: '5px 8px',
+          background: 'rgba(239,68,68,0.05)',
+          border: '1px solid rgba(239,68,68,0.12)',
+          borderRadius: 5,
+        }}>
+          Token 等同于登录凭证，只保存在本机，不要发给别人。Token 过期后需重新复制。
+        </div>
+      </div>
+      )}
 
       {/* ── 刷新 & 提醒 ── */}
       <div style={sec()}>
@@ -696,8 +877,8 @@ export default function SettingsWindow() {
               style={{ ...inputStyle, width: 70 }}
               type="number"
               min={0}
-              value={s.refreshInterval}
-              onChange={(e) => update({ refreshInterval: Number(e.target.value) })}
+              value={g.refreshInterval}
+              onChange={(e) => updateGlobal({ refreshInterval: Number(e.target.value) })}
             />
             <span style={{ color: '#5a5a6a' }}>秒（0 = 不自动刷新）</span>
           </div>
@@ -710,8 +891,8 @@ export default function SettingsWindow() {
               type="number"
               min={0}
               step={0.5}
-              value={s.lowBalanceThreshold}
-              onChange={(e) => update({ lowBalanceThreshold: Number(e.target.value) })}
+              value={g.lowBalanceThreshold}
+              onChange={(e) => updateGlobal({ lowBalanceThreshold: Number(e.target.value) })}
             />
           </div>
         </Row>
@@ -719,8 +900,8 @@ export default function SettingsWindow() {
           <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
             <input
               type="checkbox"
-              checked={s.enableNotification}
-              onChange={(e) => update({ enableNotification: e.target.checked })}
+              checked={g.enableNotification}
+              onChange={(e) => updateGlobal({ enableNotification: e.target.checked })}
             />
             <span>余额不足时弹系统通知</span>
           </label>
@@ -734,8 +915,8 @@ export default function SettingsWindow() {
           <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
             <input
               type="checkbox"
-              checked={s.alwaysOnTop}
-              onChange={(e) => update({ alwaysOnTop: e.target.checked })}
+              checked={g.alwaysOnTop}
+              onChange={(e) => updateGlobal({ alwaysOnTop: e.target.checked })}
             />
             <span>始终显示在最前</span>
           </label>
@@ -744,8 +925,8 @@ export default function SettingsWindow() {
           <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
             <input
               type="checkbox"
-              checked={s.autoLaunch}
-              onChange={(e) => update({ autoLaunch: e.target.checked })}
+              checked={g.autoLaunch}
+              onChange={(e) => updateGlobal({ autoLaunch: e.target.checked })}
             />
             <span>Windows 开机自动启动</span>
           </label>
@@ -762,8 +943,8 @@ export default function SettingsWindow() {
           <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
             <input
               type="checkbox"
-              checked={s.debugMode ?? false}
-              onChange={(e) => update({ debugMode: e.target.checked })}
+              checked={g.debugMode ?? false}
+              onChange={(e) => updateGlobal({ debugMode: e.target.checked })}
             />
             <span>刷新时在控制台打印接口字段名和状态码</span>
           </label>
@@ -773,19 +954,35 @@ export default function SettingsWindow() {
       {/* ── 数据 ── */}
       <div style={sec()}>
         <SectionTitle title="数据" />
-        <button
-          onClick={handleClearHistory}
-          disabled={clearing}
-          style={{
-            ...btnBase,
-            background: 'rgba(239,68,68,0.12)',
-            border: '1px solid rgba(239,68,68,0.25)',
-            color: '#ef4444',
-          }}
-        >
-          {clearing ? <RefreshCw size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Trash2 size={12} />}
-          清除历史记录
-        </button>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button
+            onClick={handleClearHistory}
+            disabled={clearing}
+            style={{
+              ...btnBase,
+              background: 'rgba(239,68,68,0.12)',
+              border: '1px solid rgba(239,68,68,0.25)',
+              color: '#ef4444',
+            }}
+          >
+            {clearing ? <RefreshCw size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Trash2 size={12} />}
+            清除此中转站历史
+          </button>
+          {g.profiles.length > 1 && (
+            <button
+              onClick={handleDeleteProfile}
+              style={{
+                ...btnBase,
+                background: 'rgba(239,68,68,0.12)',
+                border: '1px solid rgba(239,68,68,0.25)',
+                color: '#ef4444',
+              }}
+            >
+              <Trash2 size={12} />
+              删除此中转站配置
+            </button>
+          )}
+        </div>
       </div>
 
       {/* ── 底部固定操作栏 ── */}

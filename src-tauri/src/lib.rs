@@ -92,6 +92,7 @@ pub fn run() {
             commands::close_settings_window,
             commands::broadcast_settings_changed,
             commands::xiaoma_fetch,
+            commands::jizhi_fetch,
             commands::save_session_cookie,
             commands::notify_session_captured,
             commands::get_session_status,
@@ -146,7 +147,10 @@ fn build_tray(app: &mut App) -> tauri::Result<()> {
                 }
                 "open_web" => {
                     let s = store::read_settings(&handle3);
-                    let url = s.base_url.trim().to_string();
+                    let url = s.profiles.iter()
+                        .find(|p| p.id == s.active_profile_id)
+                        .map(|p| p.base_url.trim().to_string())
+                        .unwrap_or_default();
                     if !url.is_empty() {
                         let _ = open::that(url);
                     }

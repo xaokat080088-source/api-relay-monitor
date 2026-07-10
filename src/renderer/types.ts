@@ -14,10 +14,12 @@ export interface UsageLogItem {
   cost: number
 }
 
+export type ProviderType = 'xiaoma' | 'jizhi' | 'mock'
+
 export interface BalanceSnapshot {
   wallet: WalletSummary
   recentLogs: UsageLogItem[]
-  source: 'xiaoma' | 'mock'
+  source: ProviderType
   status: 'ok' | 'cookie_missing' | 'auth_error' | 'parse_error' | 'network_error' | 'new_api_user_missing' | 'balance_insufficient'
   timestamp: number
   logError?: string
@@ -32,17 +34,28 @@ export interface BalanceRecord {
   requestCount: number | null
   tokenUsed: number | null
   timestamp: number
-  source: 'xiaoma' | 'mock'
+  source: ProviderType
+  profileId?: string
   // 新字段（由 snapshot 填入）
   snapshot?: BalanceSnapshot
 }
 
-export interface AppSettings {
-  providerType: 'mock' | 'xiaoma'
+// 单个中转站配置
+export interface StationProfile {
+  id: string
+  name: string
+  providerType: ProviderType
   baseUrl: string
   cookie: string
   apiToken: string
   newApiUser: string
+  // 运行时注入，不持久化
+  _sessionCookie?: string
+}
+
+export interface AppSettings {
+  profiles: StationProfile[]
+  activeProfileId: string
   refreshInterval: number
   lowBalanceThreshold: number
   enableNotification: boolean
@@ -51,16 +64,27 @@ export interface AppSettings {
   windowX: number
   windowY: number
   debugMode: boolean
-  // 运行时注入，不持久化到 settings.json
-  _sessionCookie?: string
 }
 
+export function makeDefaultProfile(): StationProfile {
+  return {
+    id: (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `p_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    name: 'Mock（示例数据）',
+    providerType: 'mock',
+    baseUrl: '',
+    cookie: '',
+    apiToken: '',
+    newApiUser: '',
+  }
+}
+
+const DEFAULT_PROFILE = makeDefaultProfile()
+
 export const DEFAULT_SETTINGS: AppSettings = {
-  providerType: 'mock',
-  baseUrl: '',
-  cookie: '',
-  apiToken: '',
-  newApiUser: '',
+  profiles: [DEFAULT_PROFILE],
+  activeProfileId: DEFAULT_PROFILE.id,
   refreshInterval: 60,
   lowBalanceThreshold: 5,
   enableNotification: true,
@@ -69,4 +93,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   windowX: -1,
   windowY: -1,
   debugMode: false,
+}
+
+// 从 settings 取当前激活的 profile；找不到则返回第一个或 null
+export function getActiveProfile(settings: AppSettings): StationProfile | null {
+  if (!settings.profiles || settings.profiles.length === 0) return null
+  return settings.profiles.find((p) => p.id === settings.activeProfileId)
+    || settings.profiles[0]
 }

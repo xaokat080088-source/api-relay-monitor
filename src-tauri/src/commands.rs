@@ -14,25 +14,25 @@ pub fn save_settings(app: AppHandle, settings: AppSettings) -> AppSettings {
 }
 
 #[command]
-pub fn get_history(app: AppHandle) -> Vec<BalanceRecord> {
-    read_history(&app)
+pub fn get_history(app: AppHandle, profile_id: String) -> Vec<BalanceRecord> {
+    read_history(&app, &profile_id)
 }
 
 #[command]
-pub fn append_history(app: AppHandle, record: BalanceRecord) -> Vec<BalanceRecord> {
-    let mut history = read_history(&app);
+pub fn append_history(app: AppHandle, profile_id: String, record: BalanceRecord) -> Vec<BalanceRecord> {
+    let mut history = read_history(&app, &profile_id);
     history.push(record);
     if history.len() > 200 {
         let drain = history.len() - 200;
         history.drain(0..drain);
     }
-    write_history(&app, &history);
+    write_history(&app, &profile_id, &history);
     history
 }
 
 #[command]
-pub fn clear_history(app: AppHandle) -> Vec<BalanceRecord> {
-    write_history(&app, &[]);
+pub fn clear_history(app: AppHandle, profile_id: String) -> Vec<BalanceRecord> {
+    write_history(&app, &profile_id, &[]);
     vec![]
 }
 
@@ -660,6 +660,214 @@ pub async fn xiaoma_fetch(
         debug_resp_keys: Some(top_keys),
         debug_message: None,
     })
+}
+
+// ── 极智 API（jizhiapi.site）────────────────────────────────
+// 认证：Authorization: Bearer <JWT>
+// 用户信息：GET /api/v1/auth/me
+// 使用记录：GET /api/v1/usage?start_date=&end_date=&page=1&page_size=100
+
+fn parse_jizhi_log_item(item: &serde_json::Value) -> XiaomaLogItem {
+    // 费用：极智界面显示美元金额，字段可能是 cost/amount/quota
+    let cost = pick_f64(item, &["cost", "amount", "real_cost", "actual_cost", "money"])
+        .or_else(|| pick_f64(item, &["quota", "used_quota"]).map(quota_usd))
+        .unwrap_or(0.0);
+
+    let input_tokens = pick_i64(item, &[
+        "prompt_tokens", "promptTokens", "input_tokens", "inputTokens", "prompt",
+    ]).unwrap_or(0);
+    let output_tokens = pick_i64(item, &[
+        "completion_tokens", "completionTokens", "output_tokens", "outputTokens", "completion",
+    ]).unwrap_or(0);
+
+    let model = pick_str(item, &["model_name", "modelName", "model"])
+        .unwrap_or("--").to_string();
+    let token_name = pick_str(item, &[
+        "token_name", "tokenName", "key_name", "api_key", "name", "channel", "group",
+    ]).unwrap_or("--").to_string();
+
+    // 时间：可能是 created_at(秒/毫秒) 或 ISO 字符串
+    let ts = pick_i64(item, &["created_at", "createdAt", "created", "timestamp", "time"])
+        .unwrap_or(0) as u64;
+    let time = if ts > 0 {
+        fmt_timestamp(ts)
+    } else if let Some(s) = pick_str(item, &["created_at", "time", "created_time", "date"]) {
+        s.to_string()
+    } else {
+        "--".to_string()
+    };
+
+    XiaomaLogItem { time, timestamp: ts, token_name, model, input_tokens, output_tokens, cost }
+}
+
+#[command]
+pub async fn jizhi_fetch(
+    base_url: String,
+    bearer_token: String,
+    cookie: Option<String>,
+    debug_mode: bool,
+) -> Result<XiaomaSnapshot, String> {
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let bearer = bearer_token.trim().to_string();
+    let cookie = cookie.unwrap_or_default().trim().to_string();
+    let base = base_url.trim_end_matches('/').to_string();
+
+    let snap_err = |status: &str, msg: Option<String>, url: Option<String>, http: Option<u16>| XiaomaSnapshot {
+        wallet: XiaomaWallet { balance: 0.0, total_cost: 0.0, request_count: 0 },
+        recent_logs: vec![],
+        status: status.to_string(),
+        log_error: msg.clone(),
+        timestamp: now_ts,
+        debug_url: url,
+        debug_http_status: http,
+        debug_resp_keys: None,
+        debug_message: msg,
+    };
+
+    if bearer.is_empty() {
+        return Ok(snap_err("cookie_missing", Some("未填写 Bearer Token".into()), None, None));
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+        .build()
+        .map_err(|e| format!("network_error: {}", e))?;
+
+    // ── 1. 用户信息 /api/v1/auth/me ──
+    let me_url = format!("{}/api/v1/auth/me?timezone=Etc%2FGMT-8", base);
+    let mut req = client.get(&me_url)
+        .header("Accept", "application/json, text/plain, */*")
+        .header("Authorization", format!("Bearer {}", bearer))
+        .header("Referer", format!("{}/dashboard", base))
+        .header("Origin", &base);
+    if !cookie.is_empty() {
+        req = req.header("Cookie", &cookie);
+    }
+
+    let me_resp = match req.send().await {
+        Err(e) => return Ok(snap_err("network_error", Some(format!("请求失败: {}", e)), Some(me_url), None)),
+        Ok(r) => r,
+    };
+    let me_status = me_resp.status().as_u16();
+    if debug_mode {
+        eprintln!("[jizhi_fetch] auth/me status: {}", me_status);
+    }
+    if me_status == 401 || me_status == 403 {
+        let body = me_resp.text().await.unwrap_or_default();
+        let msg: String = body.chars().take(120).collect();
+        return Ok(snap_err("auth_error", Some(if msg.is_empty() { "Token 无效或已过期".into() } else { msg }), Some(me_url), Some(me_status)));
+    }
+    if me_status < 200 || me_status >= 300 {
+        let body = me_resp.text().await.unwrap_or_default();
+        let preview: String = body.chars().take(120).collect();
+        return Ok(snap_err("network_error", Some(format!("HTTP {}: {}", me_status, preview)), Some(me_url), Some(me_status)));
+    }
+
+    let me_json: serde_json::Value = match me_resp.json().await {
+        Err(e) => return Ok(snap_err("parse_error", Some(format!("JSON 解析失败: {}", e)), Some(me_url), Some(me_status))),
+        Ok(v) => v,
+    };
+
+    let top_keys = me_json.as_object()
+        .map(|o| o.keys().cloned().collect::<Vec<_>>().join(", "))
+        .unwrap_or_default();
+    if debug_mode {
+        eprintln!("[jizhi_fetch] auth/me keys: {}", top_keys);
+    }
+
+    // 数据可能在 data / user 字段里，或顶层
+    let d = me_json.get("data")
+        .or_else(|| me_json.get("user"))
+        .unwrap_or(&me_json);
+    if debug_mode {
+        if let Some(o) = d.as_object() {
+            eprintln!("[jizhi_fetch] me data keys: {:?}", o.keys().collect::<Vec<_>>());
+        }
+    }
+
+    // 余额：极智界面显示美元，字段名尝试多种
+    let balance = pick_f64(d, &["balance", "remain", "remaining", "credit", "money"])
+        .or_else(|| pick_f64(d, &["quota", "remain_quota"]).map(quota_usd))
+        .unwrap_or(0.0);
+    let total_cost = pick_f64(d, &["total_cost", "used", "used_money", "total_used", "spent"])
+        .or_else(|| pick_f64(d, &["used_quota"]).map(quota_usd))
+        .unwrap_or(0.0);
+    let request_count = pick_i64(d, &["request_count", "total_requests", "requests", "count"])
+        .unwrap_or(0);
+
+    let wallet = XiaomaWallet { balance, total_cost, request_count };
+
+    // ── 2. 使用记录 /api/v1/usage ──
+    let start_ymd = fmt_date(now_ts.saturating_sub(86400 * 7));
+    let end_ymd = fmt_date(now_ts);
+    let usage_url = format!(
+        "{}/api/v1/usage?start_date={}&end_date={}&page=1&page_size=100&timezone=Etc%2FGMT-8",
+        base, start_ymd, end_ymd
+    );
+    let mut ureq = client.get(&usage_url)
+        .header("Accept", "application/json, text/plain, */*")
+        .header("Authorization", format!("Bearer {}", bearer))
+        .header("Referer", format!("{}/dashboard", base))
+        .header("Origin", &base);
+    if !cookie.is_empty() {
+        ureq = ureq.header("Cookie", &cookie);
+    }
+
+    let (recent_logs, log_error) = match ureq.send().await {
+        Err(e) => (vec![], Some(format!("网络失败: {}", e))),
+        Ok(resp) => {
+            let us = resp.status().as_u16();
+            if debug_mode {
+                eprintln!("[jizhi_fetch] usage status: {}", us);
+            }
+            if us < 200 || us >= 300 {
+                (vec![], Some(format!("使用记录接口 HTTP {}", us)))
+            } else {
+                match resp.json::<serde_json::Value>().await {
+                    Err(e) => (vec![], Some(format!("使用记录解析失败: {}", e))),
+                    Ok(uj) => {
+                        if debug_mode {
+                            if let Some(o) = uj.as_object() {
+                                eprintln!("[jizhi_fetch] usage keys: {:?}", o.keys().collect::<Vec<_>>());
+                            }
+                        }
+                        let raw = extract_logs(&uj);
+                        if debug_mode && !raw.is_empty() {
+                            if let Some(o) = raw[0].as_object() {
+                                eprintln!("[jizhi_fetch] usage[0] keys: {:?}", o.keys().collect::<Vec<_>>());
+                            }
+                        }
+                        let logs: Vec<XiaomaLogItem> = raw.iter().map(parse_jizhi_log_item).collect();
+                        (logs, None)
+                    }
+                }
+            }
+        }
+    };
+
+    Ok(XiaomaSnapshot {
+        wallet,
+        recent_logs,
+        status: "ok".to_string(),
+        log_error,
+        timestamp: now_ts,
+        debug_url: Some(me_url),
+        debug_http_status: Some(me_status),
+        debug_resp_keys: Some(top_keys),
+        debug_message: None,
+    })
+}
+
+// 时间戳(秒) → YYYY-MM-DD（东八区）
+fn fmt_date(ts: u64) -> String {
+    let secs_local = ts + 8 * 3600;
+    let days = secs_local / 86400;
+    let (y, mo, d) = days_from_epoch(days);
+    format!("{:04}-{:02}-{:02}", y, mo, d)
 }
 
 // ── 开机自启动 ────────────────────────────────────────────────

@@ -1,7 +1,6 @@
-import { AppSettings, BalanceRecord } from '../types'
+import { AppSettings, BalanceRecord, StationProfile, getActiveProfile } from '../types'
 import { getProvider } from './provider'
 import { historyStore } from './historyStore'
-import { tauriAPI } from './tauriAPI'
 
 type Listener = (record: BalanceRecord, history: BalanceRecord[]) => void
 type ErrorListener = (err: Error) => void
@@ -26,25 +25,20 @@ export class BalanceService {
     return () => { this.errorListeners = this.errorListeners.filter((l) => l !== cb) }
   }
 
+  // 返回当前激活 profile（供外部读取 id）
+  getActiveProfile(): StationProfile | null {
+    return this.settings ? getActiveProfile(this.settings) : null
+  }
+
   async refresh(): Promise<BalanceRecord | null> {
     if (!this.settings) return null
+    const profile = getActiveProfile(this.settings)
+    if (!profile) return null
     try {
-      // 读取 sessionCookie（来自登录窗口捕获），注入到本次调用的 settings 副本
-      let sessionCookie = ''
-      try {
-        sessionCookie = await tauriAPI.getSessionCookie()
-      } catch {
-        // 读取失败不阻塞，留空让 provider 自己判断
-      }
-
-      const settingsWithSession: AppSettings = {
-        ...this.settings,
-        _sessionCookie: sessionCookie,
-      }
-
-      const provider = getProvider(settingsWithSession)
-      const record = await provider.fetch(settingsWithSession)
-      const history = await historyStore.append(record)
+      const provider = getProvider(profile.providerType)
+      const record = await provider.fetch({ profile, debugMode: this.settings.debugMode })
+      record.profileId = profile.id
+      const history = await historyStore.append(profile.id, record)
       this.listeners.forEach((l) => l(record, history))
       return record
     } catch (e) {

@@ -6,7 +6,7 @@ import {
 import TrendChart from './TrendChart'
 import {
   BalanceRecord, BalanceSnapshot, UsageLogItem,
-  AppSettings, DEFAULT_SETTINGS,
+  AppSettings, DEFAULT_SETTINGS, StationProfile, getActiveProfile,
 } from '../types'
 import { balanceService } from '../services/balanceService'
 import { historyStore } from '../services/historyStore'
@@ -161,17 +161,31 @@ export default function FloatingWindow() {
     await balanceService.refresh()
   }, [])
 
+  // 切换到下一个中转站（点标题循环切换）
+  const handleSwitchProfile = useCallback(async () => {
+    const cur = settingsRef.current
+    if (!cur.profiles || cur.profiles.length < 2) return
+    const idx = cur.profiles.findIndex((p) => p.id === cur.activeProfileId)
+    const next = cur.profiles[(idx + 1) % cur.profiles.length]
+    await tauriAPI.saveSettings({ ...cur, activeProfileId: next.id })
+    await refreshWithLatestSettings()
+  }, [refreshWithLatestSettings])
+
   useEffect(() => {
     let unsubRefresh: (() => void) | undefined
     let unsubSettings: (() => void) | undefined
 
     ;(async () => {
-      // 启动时读一次历史，避免空白闪烁
-      const h = await tauriAPI.getHistory()
-      if (h.length > 0) {
-        const last = h[h.length - 1]
-        setRecord(last)
-        if (last.snapshot) setSnapshot(last.snapshot)
+      // 启动时读一次当前激活 profile 的历史，避免空白闪烁
+      const s0 = { ...DEFAULT_SETTINGS, ...(await tauriAPI.getSettings()) }
+      const active0 = getActiveProfile(s0)
+      if (active0) {
+        const h = await tauriAPI.getHistory(active0.id)
+        if (h.length > 0) {
+          const last = h[h.length - 1]
+          setRecord(last)
+          if (last.snapshot) setSnapshot(last.snapshot)
+        }
       }
 
       await refreshWithLatestSettings()
@@ -407,8 +421,12 @@ export default function FloatingWindow() {
   const isLow = balance !== null && settingsRef.current.lowBalanceThreshold > 0
     && balance < settingsRef.current.lowBalanceThreshold
 
-  // 顶部状态角标：用 ref 避免 setState 异步导致仍显示旧 providerType
-  const tag = getStatusTag(settingsRef.current.providerType, error, errorStatus)
+  // 当前激活 profile（决定标题名 + 状态角标）
+  const activeProfile = getActiveProfile(settings)
+  const profileCount = settings.profiles?.length ?? 1
+
+  // 顶部状态角标：按当前 profile 的 providerType
+  const tag = getStatusTag(activeProfile?.providerType ?? 'mock', error, errorStatus)
   const tagStyle = TAG_STYLE[tag]
 
   // 顶部错误文案（只针对余额接口失败）
@@ -450,9 +468,33 @@ export default function FloatingWindow() {
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
           <GripHorizontal size={11} color="var(--text-dim)" style={{ flexShrink: 0 }} />
-          <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
-            API Monitor
+          <span
+            onMouseDown={(e) => { if (profileCount > 1) e.stopPropagation() }}
+            onClick={() => { if (profileCount > 1) handleSwitchProfile() }}
+            title={profileCount > 1 ? '点击切换中转站' : undefined}
+            style={{
+              fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)',
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              maxWidth: 110,
+              cursor: profileCount > 1 ? 'pointer' : 'grab',
+            }}
+          >
+            {activeProfile?.name || 'API Monitor'}
           </span>
+          {profileCount > 1 && (
+            <span
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={() => handleSwitchProfile()}
+              title="切换中转站"
+              style={{
+                fontSize: 8, color: 'var(--text-dim)', cursor: 'pointer',
+                border: '1px solid rgba(255,255,255,0.12)', borderRadius: 3,
+                padding: '0 3px', lineHeight: '13px', flexShrink: 0,
+              }}
+            >
+              ⇄
+            </span>
+          )}
           <span style={{
             fontSize: 9, borderRadius: 3, padding: '0 4px', lineHeight: '14px',
             background: tagStyle.bg, color: tagStyle.text,
@@ -470,7 +512,8 @@ export default function FloatingWindow() {
           </IconBtn>
           <IconBtn
             onClick={() => {
-              const url = (settingsRef.current.baseUrl || '').trim()
+              const ap = getActiveProfile(settingsRef.current)
+              const url = (ap?.baseUrl || '').trim()
               if (url) tauriAPI.openUrl(url)
             }}
             title="打开中转站官网"

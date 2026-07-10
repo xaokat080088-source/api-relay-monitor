@@ -1,5 +1,5 @@
 import { Provider } from './base'
-import { BalanceRecord, BalanceSnapshot, UsageLogItem, AppSettings } from '../../types'
+import { BalanceRecord, BalanceSnapshot, UsageLogItem } from '../../types'
 
 const MODELS = [
   'example-model-pro',
@@ -25,7 +25,7 @@ function fmtTime(d: Date) {
 export const MockProvider: Provider = {
   name: 'mock',
 
-  async fetch(_settings: AppSettings): Promise<BalanceRecord> {
+  async fetch(): Promise<BalanceRecord> {
     const inputTokens = Math.floor(Math.random() * 50000 + 10000)
     const outputTokens = Math.floor(Math.random() * 200 + 50)
     const cost = parseFloat((Math.random() * 0.05 + 0.15).toFixed(6))

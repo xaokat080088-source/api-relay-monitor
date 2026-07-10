@@ -2,35 +2,35 @@ import { Provider, ProviderContext } from './base'
 import { BalanceRecord, BalanceSnapshot } from '../../types'
 import { tauriAPI, XiaomaSnapshot } from '../tauriAPI'
 
-// XiaomaProvider 不再在渲染进程直接 fetch（会被 WebView CORS 拦截）。
-// 全部走 Rust 后端 xiaoma_fetch command，由 reqwest 发起请求。
+// 极智 API（jizhiapi.site）：New-API 前端但接口路径不同，认证走 Bearer JWT。
+// 用户信息：GET /api/v1/auth/me
+// 使用记录：GET /api/v1/usage
+// JWT 填在 profile.apiToken 字段；Cookie 可选做兜底。
+// 全部走 Rust 后端 jizhi_fetch，绕过 WebView CORS。
 
-export const XiaomaProvider: Provider = {
-  name: 'xiaoma',
+export const JizhiProvider: Provider = {
+  name: 'jizhi',
 
   async fetch({ profile, debugMode }: ProviderContext): Promise<BalanceRecord> {
+    const bearer = (profile.apiToken || '').trim()
     const cookie = profile._sessionCookie || profile.cookie || ''
-    const apiToken = profile.apiToken || ''
-    const newApiUser = profile.newApiUser || ''
-    const baseUrl = (profile.baseUrl || '').trim()
+    const baseUrl = (profile.baseUrl || 'https://jizhiapi.site').trim()
     const debug = debugMode ?? false
 
     let snap: XiaomaSnapshot
     try {
-      snap = await tauriAPI.xiaomaFetch(baseUrl, cookie, apiToken || null, newApiUser || null, debug)
+      snap = await tauriAPI.jizhiFetch(baseUrl, bearer, cookie || null, debug)
     } catch (e) {
-      // Rust 侧抛出字符串错误（network_error / parse_error 等）
       const msg = String(e)
       const status: BalanceSnapshot['status'] =
         msg.includes('auth_error') ? 'auth_error' :
         msg.includes('cookie_missing') ? 'cookie_missing' :
         msg.includes('parse_error') ? 'parse_error' :
         'network_error'
-
       const snapshot: BalanceSnapshot = {
         wallet: { balance: 0, totalCost: 0, requestCount: 0 },
         recentLogs: [],
-        source: 'xiaoma',
+        source: 'jizhi',
         status,
         timestamp: Date.now(),
         logError: msg,
@@ -38,47 +38,22 @@ export const XiaomaProvider: Provider = {
       throw Object.assign(new Error(msg.toUpperCase()), { snapshot })
     }
 
-    // cookie_missing / auth_error 时 Rust 返回 Ok(snapshot) 而非 Err
     if (snap.status === 'cookie_missing') {
       const snapshot: BalanceSnapshot = {
         wallet: { balance: 0, totalCost: 0, requestCount: 0 },
         recentLogs: [],
-        source: 'xiaoma',
+        source: 'jizhi',
         status: 'cookie_missing',
         timestamp: Date.now(),
       }
       throw Object.assign(new Error('COOKIE_MISSING'), { snapshot })
     }
 
-    if (snap.status === 'new_api_user_missing') {
-      const snapshot: BalanceSnapshot = {
-        wallet: { balance: 0, totalCost: 0, requestCount: 0 },
-        recentLogs: [],
-        source: 'xiaoma',
-        status: 'new_api_user_missing',
-        timestamp: Date.now(),
-        logError: snap.logError ?? undefined,
-      }
-      throw Object.assign(new Error('NEW_API_USER_MISSING'), { snapshot })
-    }
-
-    if (snap.status === 'balance_insufficient') {
-      const snapshot: BalanceSnapshot = {
-        wallet: { balance: 0, totalCost: 0, requestCount: 0 },
-        recentLogs: [],
-        source: 'xiaoma',
-        status: 'balance_insufficient',
-        timestamp: Date.now(),
-        logError: snap.logError ?? undefined,
-      }
-      throw Object.assign(new Error('BALANCE_INSUFFICIENT'), { snapshot })
-    }
-
     if (snap.status === 'auth_error') {
       const snapshot: BalanceSnapshot = {
         wallet: { balance: 0, totalCost: 0, requestCount: 0 },
         recentLogs: [],
-        source: 'xiaoma',
+        source: 'jizhi',
         status: 'auth_error',
         timestamp: Date.now(),
         logError: snap.logError ?? undefined,
@@ -86,7 +61,18 @@ export const XiaomaProvider: Provider = {
       throw Object.assign(new Error('AUTH_ERROR'), { snapshot })
     }
 
-    // 转换 Rust camelCase 字段到前端类型
+    if (snap.status === 'balance_insufficient') {
+      const snapshot: BalanceSnapshot = {
+        wallet: { balance: 0, totalCost: 0, requestCount: 0 },
+        recentLogs: [],
+        source: 'jizhi',
+        status: 'balance_insufficient',
+        timestamp: Date.now(),
+        logError: snap.logError ?? undefined,
+      }
+      throw Object.assign(new Error('BALANCE_INSUFFICIENT'), { snapshot })
+    }
+
     const recentLogs = snap.recentLogs.map((item) => ({
       time: item.time,
       timestamp: item.timestamp,
@@ -107,7 +93,7 @@ export const XiaomaProvider: Provider = {
         requestCount: snap.wallet.requestCount,
       },
       recentLogs,
-      source: 'xiaoma',
+      source: 'jizhi',
       status: snapshotStatus,
       timestamp: snap.timestamp * 1000,
       logError: snap.logError ?? undefined,
@@ -122,7 +108,7 @@ export const XiaomaProvider: Provider = {
       requestCount: snap.wallet.requestCount,
       tokenUsed: latest ? latest.inputTokens + latest.outputTokens : null,
       timestamp: snap.timestamp * 1000,
-      source: 'xiaoma',
+      source: 'jizhi',
       snapshot,
     }
   },

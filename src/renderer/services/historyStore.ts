@@ -2,20 +2,20 @@ import { BalanceRecord } from '../types'
 import { tauriAPI } from './tauriAPI'
 
 export class HistoryStore {
-  async getAll(): Promise<BalanceRecord[]> {
+  async getAll(profileId: string): Promise<BalanceRecord[]> {
     try {
-      return (await tauriAPI.getHistory()) ?? []
+      return (await tauriAPI.getHistory(profileId)) ?? []
     } catch {
       return []
     }
   }
 
-  async append(record: BalanceRecord): Promise<BalanceRecord[]> {
-    return tauriAPI.appendHistory(record)
+  async append(profileId: string, record: BalanceRecord): Promise<BalanceRecord[]> {
+    return tauriAPI.appendHistory(profileId, record)
   }
 
-  async clear(): Promise<BalanceRecord[]> {
-    return tauriAPI.clearHistory()
+  async clear(profileId: string): Promise<BalanceRecord[]> {
+    return tauriAPI.clearHistory(profileId)
   }
 
   getTodayCostFromHistory(history: BalanceRecord[]): number {

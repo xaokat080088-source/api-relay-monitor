@@ -43,10 +43,11 @@ export const tauriAPI = {
   getSettings: () => invoke<AppSettings>('get_settings'),
   saveSettings: (s: AppSettings) => invoke<AppSettings>('save_settings', { settings: s }),
 
-  // ── 历史 ──────────────────────────────────────────────────
-  getHistory: () => invoke<BalanceRecord[]>('get_history'),
-  appendHistory: (r: BalanceRecord) => invoke<BalanceRecord[]>('append_history', { record: r }),
-  clearHistory: () => invoke<BalanceRecord[]>('clear_history'),
+  // ── 历史（按 profile 分开存）──────────────────────────────
+  getHistory: (profileId: string) => invoke<BalanceRecord[]>('get_history', { profileId }),
+  appendHistory: (profileId: string, r: BalanceRecord) =>
+    invoke<BalanceRecord[]>('append_history', { profileId, record: r }),
+  clearHistory: (profileId: string) => invoke<BalanceRecord[]>('clear_history', { profileId }),
 
   // ── 窗口 ──────────────────────────────────────────────────
   openUrl: (url: string) => invoke<void>('open_url', { url }),
@@ -87,6 +88,19 @@ export const tauriAPI = {
     cookie,
     apiToken: apiToken || null,
     newApiUser: newApiUser || null,
+    debugMode,
+  }),
+
+  // ── Jizhi API 代理（Bearer JWT 认证，接口路径 /api/v1/...）──
+  jizhiFetch: (
+    baseUrl: string,
+    bearerToken: string,
+    cookie: string | null,
+    debugMode: boolean,
+  ) => invoke<XiaomaSnapshot>('jizhi_fetch', {
+    baseUrl,
+    bearerToken,
+    cookie: cookie || null,
     debugMode,
   }),
 

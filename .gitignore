@@ -2,6 +2,7 @@
 node_modules/
 dist/
 src-tauri/target/
+.claude/
 src-tauri/gen/schemas/
 
 # logs
