@@ -104,6 +104,28 @@ export const tauriAPI = {
     debugMode,
   }),
 
+  // ── Jizhi New API 代理（极智新版 jizhiapi.site）──
+  jizhiNewFetch: (
+    baseUrl: string,
+    bearerToken: string,
+    debugMode: boolean,
+  ) => invoke<XiaomaSnapshot>('jizhi_new_fetch', {
+    baseUrl,
+    bearerToken,
+    debugMode,
+  }),
+
+  // ── X网站 API 代理（x-llm.net）──
+  xllmFetch: (
+    baseUrl: string,
+    bearerToken: string,
+    debugMode: boolean,
+  ) => invoke<XiaomaSnapshot>('xllm_fetch', {
+    baseUrl,
+    bearerToken,
+    debugMode,
+  }),
+
   // ── 事件 ──────────────────────────────────────────────────
   onRefresh: (cb: () => void) => listen('cmd:refresh', cb),
   onSettingsChanged: (cb: () => void) => listen('cmd:settings-changed', cb),

@@ -14,7 +14,7 @@ export interface UsageLogItem {
   cost: number
 }
 
-export type ProviderType = 'xiaoma' | 'jizhi' | 'mock'
+export type ProviderType = 'xiaoma' | 'jizhi' | 'jizhi_new' | 'xllm' | 'mock'
 
 export interface BalanceSnapshot {
   wallet: WalletSummary

@@ -248,7 +248,7 @@ export default function SettingsWindow() {
 
       let snap
       if (editing.providerType === 'jizhi') {
-        // 极智：Bearer JWT 认证，填在 API Token 字段
+        // 极智旧版：Bearer JWT 认证，填在 API Token 字段
         if (!effectiveToken) {
           setTestResult({
             ok: false,
@@ -258,6 +258,28 @@ export default function SettingsWindow() {
           return
         }
         snap = await tauriAPI.jizhiFetch(baseUrl, effectiveToken, effectiveCookie || null, g.debugMode ?? false)
+      } else if (editing.providerType === 'jizhi_new') {
+        // 极智新版：Bearer JWT 认证
+        if (!effectiveToken) {
+          setTestResult({
+            ok: false,
+            error: '极智新版 API 需要 Bearer Token，请把 Authorization 里的 JWT 填到 API Token 字段',
+            errorType: 'AUTH',
+          })
+          return
+        }
+        snap = await tauriAPI.jizhiNewFetch(baseUrl, effectiveToken, g.debugMode ?? false)
+      } else if (editing.providerType === 'xllm') {
+        // X网站：Bearer JWT 认证
+        if (!effectiveToken) {
+          setTestResult({
+            ok: false,
+            error: 'X网站 API 需要 Bearer Token，请把 Authorization 里的 JWT 填到 API Token 字段',
+            errorType: 'AUTH',
+          })
+          return
+        }
+        snap = await tauriAPI.xllmFetch(baseUrl, effectiveToken, g.debugMode ?? false)
       } else {
         // xiaoma / New-API 系列：Cookie + New-Api-User
         if (!effectiveCookie && !effectiveToken) {
@@ -538,7 +560,9 @@ export default function SettingsWindow() {
           >
             <option value="mock">Mock（本地假数据）</option>
             <option value="xiaoma">小马 / New API / One API（Cookie 认证）</option>
-            <option value="jizhi">极智 API（jizhiapi.site，Token 认证）</option>
+            <option value="jizhi">极智 API 旧版（Token 认证，已停用）</option>
+            <option value="jizhi_new">极智 API 新版（jizhiapi.site，Bearer JWT）</option>
+            <option value="xllm">X网站（x-llm.net，Bearer JWT）</option>
           </select>
         </Row>
         {editing?.providerType !== 'mock' && (
@@ -547,7 +571,12 @@ export default function SettingsWindow() {
               style={inputStyle}
               value={editing?.baseUrl ?? ''}
               onChange={(e) => updateProfile({ baseUrl: e.target.value })}
-              placeholder={editing?.providerType === 'jizhi' ? 'https://jizhiapi.site' : 'https://example.com'}
+              placeholder={
+                editing?.providerType === 'jizhi' ? 'https://jizhiapi.site' :
+                editing?.providerType === 'jizhi_new' ? 'https://jizhiapi.site' :
+                editing?.providerType === 'xllm' ? 'https://x-llm.net' :
+                'https://example.com'
+              }
             />
           </Row>
         )}
@@ -556,7 +585,11 @@ export default function SettingsWindow() {
       {/* ── 认证 ── */}
       {editing && editing.providerType !== 'mock' && (
       <div style={sec()}>
-        <SectionTitle title={editing.providerType === 'jizhi' ? '认证 Token' : '认证 Cookie'} />
+        <SectionTitle title={
+          (editing.providerType === 'jizhi' || editing.providerType === 'jizhi_new' || editing.providerType === 'xllm')
+            ? '认证 Token'
+            : '认证 Cookie'
+        } />
 
         {/* 状态提示 */}
         <div style={{
@@ -579,7 +612,11 @@ export default function SettingsWindow() {
               type={showCookie ? 'text' : 'password'}
               value={editing.cookie}
               onChange={(e) => updateProfile({ cookie: e.target.value })}
-              placeholder={editing.providerType === 'jizhi' ? '极智无需 Cookie，可留空' : 'session=xxx; token=yyy'}
+              placeholder={
+                (editing.providerType === 'jizhi' || editing.providerType === 'jizhi_new' || editing.providerType === 'xllm')
+                  ? '此 Provider 无需 Cookie，可留空'
+                  : 'session=xxx; token=yyy'
+              }
               autoComplete="off"
               spellCheck={false}
             />
@@ -595,8 +632,8 @@ export default function SettingsWindow() {
             </button>
           </div>
           <div style={{ fontSize: 10, color: '#5a5a6a', marginTop: 4 }}>
-            {editing.providerType === 'jizhi'
-              ? '极智 API 用下方 API Token 认证，此项可留空'
+            {(editing.providerType === 'jizhi' || editing.providerType === 'jizhi_new' || editing.providerType === 'xllm')
+              ? '此 Provider 用下方 API Token (Bearer JWT) 认证，此项可留空'
               : <>请填写完整 Cookie，例如 <code>session=你的值</code>，不要只粘贴 value</>}
           </div>
         </Row>
@@ -609,7 +646,11 @@ export default function SettingsWindow() {
               type={showToken ? 'text' : 'password'}
               value={editing.apiToken}
               onChange={(e) => updateProfile({ apiToken: e.target.value })}
-              placeholder={editing.providerType === 'jizhi' ? '粘贴 Authorization 里的 Bearer JWT（必填）' : 'Bearer Token（可选）'}
+              placeholder={
+                (editing.providerType === 'jizhi' || editing.providerType === 'jizhi_new' || editing.providerType === 'xllm')
+                  ? '粘贴 Authorization 里的 Bearer JWT（必填）'
+                  : 'Bearer Token（可选）'
+              }
               autoComplete="off"
               spellCheck={false}
             />
@@ -624,15 +665,15 @@ export default function SettingsWindow() {
               {showToken ? <EyeOff size={12} /> : <Eye size={12} />}
             </button>
           </div>
-          {editing.providerType === 'jizhi' && (
+          {(editing.providerType === 'jizhi' || editing.providerType === 'jizhi_new' || editing.providerType === 'xllm') && (
             <div style={{ fontSize: 10, color: '#5a5a6a', marginTop: 4 }}>
-              F12 → 网络 → 打开 <code>/api/v1/auth/me</code> 请求 → 请求标头里 <code>Authorization: Bearer</code> 后面那一长串
+              F12 → 网络 → 找到 API 请求 → 请求标头里 <code>Authorization: Bearer</code> 后面那一长串 JWT
             </div>
           )}
         </Row>
 
-        {/* New-Api-User（极智不需要） */}
-        {editing.providerType !== 'jizhi' && (
+        {/* New-Api-User（仅小马等 Cookie 认证站需要） */}
+        {editing.providerType === 'xiaoma' && (
           <Row label="New-Api-User">
             <input
               style={{ ...inputStyle, fontFamily: 'monospace' }}
@@ -837,10 +878,10 @@ export default function SettingsWindow() {
       </>
       )}
 
-      {/* ── 极智 API 获取引导（仅极智显示）── */}
+      {/* ── 极智 API 旧版获取引导（仅旧版极智显示）── */}
       {editing && editing.providerType === 'jizhi' && (
       <div style={sec()}>
-        <SectionTitle title="如何获取极智 API Token" />
+        <SectionTitle title="如何获取极智 API Token（旧版，已停用）" />
         <div style={{
           fontSize: 11, color: '#8a8a9a', lineHeight: 2,
           background: 'rgba(255,255,255,0.03)',
@@ -852,6 +893,68 @@ export default function SettingsWindow() {
             <li>按 F12 打开开发者工具，切到 <code style={{ color: '#f0c040' }}>网络</code> / Network</li>
             <li>刷新页面（F5），在搜索框输入 <code style={{ color: '#f0c040' }}>me</code></li>
             <li>点击 <code style={{ color: '#f0c040' }}>/api/v1/auth/me</code> 请求 → 请求标头</li>
+            <li>找到 <code style={{ color: '#f0c040' }}>Authorization</code>，复制 <code style={{ color: '#f0c040' }}>Bearer</code> 后面那一长串（JWT）</li>
+            <li>粘贴到上方 API Token 框，点击保存，再测试连接</li>
+          </ol>
+        </div>
+        <div style={{
+          marginTop: 8, fontSize: 10, color: '#5a5a6a',
+          padding: '5px 8px',
+          background: 'rgba(239,68,68,0.05)',
+          border: '1px solid rgba(239,68,68,0.12)',
+          borderRadius: 5,
+        }}>
+          Token 等同于登录凭证，只保存在本机，不要发给别人。Token 过期后需重新复制。
+        </div>
+      </div>
+      )}
+
+      {/* ── 极智 API 新版获取引导 ── */}
+      {editing && editing.providerType === 'jizhi_new' && (
+      <div style={sec()}>
+        <SectionTitle title="如何获取极智新版 API Token" />
+        <div style={{
+          fontSize: 11, color: '#8a8a9a', lineHeight: 2,
+          background: 'rgba(255,255,255,0.03)',
+          border: '1px solid rgba(255,255,255,0.06)',
+          borderRadius: 6, padding: '10px 12px',
+        }}>
+          <ol style={{ margin: 0, paddingLeft: 18 }}>
+            <li>浏览器登录 <code style={{ color: '#f0c040' }}>https://jizhiapi.site</code></li>
+            <li>按 F12 打开开发者工具，切到 <code style={{ color: '#f0c040' }}>网络</code> / Network</li>
+            <li>刷新页面（F5），在搜索框输入 <code style={{ color: '#f0c040' }}>me</code></li>
+            <li>点击 <code style={{ color: '#f0c040' }}>/api/v1/auth/me</code> 请求 → 请求标头</li>
+            <li>找到 <code style={{ color: '#f0c040' }}>Authorization</code>，复制 <code style={{ color: '#f0c040' }}>Bearer</code> 后面那一长串（JWT）</li>
+            <li>粘贴到上方 API Token 框，点击保存，再测试连接</li>
+          </ol>
+        </div>
+        <div style={{
+          marginTop: 8, fontSize: 10, color: '#5a5a6a',
+          padding: '5px 8px',
+          background: 'rgba(239,68,68,0.05)',
+          border: '1px solid rgba(239,68,68,0.12)',
+          borderRadius: 5,
+        }}>
+          Token 等同于登录凭证，只保存在本机，不要发给别人。Token 过期后需重新复制。
+        </div>
+      </div>
+      )}
+
+      {/* ── X网站 API 获取引导 ── */}
+      {editing && editing.providerType === 'xllm' && (
+      <div style={sec()}>
+        <SectionTitle title="如何获取 X网站 API Token" />
+        <div style={{
+          fontSize: 11, color: '#8a8a9a', lineHeight: 2,
+          background: 'rgba(255,255,255,0.03)',
+          border: '1px solid rgba(255,255,255,0.06)',
+          borderRadius: 6, padding: '10px 12px',
+        }}>
+          <ol style={{ margin: 0, paddingLeft: 18 }}>
+            <li>浏览器登录 <code style={{ color: '#f0c040' }}>https://x-llm.net</code></li>
+            <li>按 F12 打开开发者工具，切到 <code style={{ color: '#f0c040' }}>网络</code> / Network</li>
+            <li>刷新页面（F5），在搜索框输入 <code style={{ color: '#f0c040' }}>self</code></li>
+            <li>点击 <code style={{ color: '#f0c040' }}>/api/user/self</code> 请求 → 请求标头</li>
             <li>找到 <code style={{ color: '#f0c040' }}>Authorization</code>，复制 <code style={{ color: '#f0c040' }}>Bearer</code> 后面那一长串（JWT）</li>
             <li>粘贴到上方 API Token 框，点击保存，再测试连接</li>
           </ol>
@@ -931,7 +1034,19 @@ export default function SettingsWindow() {
             <span>Windows 开机自动启动</span>
           </label>
           {autostartError && (
-            <div style={{ fontSize: 10, color: '#f87171', marginTop: 4 }}>{autostartError}</div>
+            <div style={{
+              fontSize: 10,
+              color: '#f87171',
+              marginTop: 6,
+              padding: '6px 10px',
+              background: 'rgba(239,68,68,0.08)',
+              border: '1px solid rgba(239,68,68,0.2)',
+              borderRadius: 4,
+              lineHeight: 1.6,
+              whiteSpace: 'pre-line',
+            }}>
+              {autostartError}
+            </div>
           )}
         </Row>
       </div>
@@ -1043,6 +1158,33 @@ export default function SettingsWindow() {
         >
           关闭
         </button>
+      </div>
+
+      {/* GitHub 链接 */}
+      <div style={{
+        marginTop: 16,
+        paddingTop: 12,
+        borderTop: '1px solid rgba(255,255,255,0.06)',
+        textAlign: 'center',
+      }}>
+        <a
+          href="https://github.com/xaokat080088-source/api-relay-monitor"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            fontSize: 10,
+            color: '#5a5a6a',
+            textDecoration: 'none',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 4,
+          }}
+          onMouseEnter={(e) => e.currentTarget.style.color = '#8a8a9a'}
+          onMouseLeave={(e) => e.currentTarget.style.color = '#5a5a6a'}
+        >
+          <ExternalLink size={10} />
+          GitHub: xaokat080088-source/api-relay-monitor
+        </a>
       </div>
 
       <style>{`

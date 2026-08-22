@@ -93,6 +93,8 @@ pub fn run() {
             commands::broadcast_settings_changed,
             commands::xiaoma_fetch,
             commands::jizhi_fetch,
+            commands::jizhi_new_fetch,
+            commands::xllm_fetch,
             commands::save_session_cookie,
             commands::notify_session_captured,
             commands::get_session_status,

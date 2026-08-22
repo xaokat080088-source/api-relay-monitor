@@ -300,17 +300,22 @@ fn quota_usd(q: f64) -> f64 {
 }
 
 fn fmt_timestamp(ts: u64) -> String {
+    use chrono::{TimeZone, Utc};
     // ts 可能是秒或毫秒
-    let ms = if ts > 1_000_000_000_000 { ts } else { ts * 1000 };
-    let secs = ms / 1000;
-    // 加东八区偏移（+8h = +28800s）
-    let secs_local = secs + 8 * 3600;
-    let s = secs_local % 60;
-    let m = (secs_local / 60) % 60;
-    let h = (secs_local / 3600) % 24;
-    let days_since_epoch = secs_local / 86400;
-    let (y, mo, d) = days_from_epoch(days_since_epoch);
-    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, mo, d, h, m, s)
+    let secs = if ts > 1_000_000_000_000 {
+        (ts / 1000) as i64
+    } else {
+        ts as i64
+    };
+
+    // 使用 chrono 转换为东八区时间
+    if let Some(dt) = Utc.timestamp_opt(secs, 0).single() {
+        // 转换为东八区 (+08:00)
+        let local = dt.with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap());
+        local.format("%Y-%m-%d %H:%M:%S").to_string()
+    } else {
+        "--".to_string()
+    }
 }
 
 fn days_from_epoch(mut z: u64) -> (u32, u32, u32) {
@@ -686,15 +691,27 @@ fn parse_jizhi_log_item(item: &serde_json::Value) -> XiaomaLogItem {
         "token_name", "tokenName", "key_name", "api_key", "name", "channel", "group",
     ]).unwrap_or("--").to_string();
 
-    // 时间：可能是 created_at(秒/毫秒) 或 ISO 字符串
-    let ts = pick_i64(item, &["created_at", "createdAt", "created", "timestamp", "time"])
-        .unwrap_or(0) as u64;
-    let time = if ts > 0 {
-        fmt_timestamp(ts)
-    } else if let Some(s) = pick_str(item, &["created_at", "time", "created_time", "date"]) {
-        s.to_string()
+    // 时间：优先尝试解析 ISO 字符串，再尝试数字时间戳
+    let (time, ts) = if let Some(time_str) = pick_str(item, &["created_at", "time", "created_time", "date"]) {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(time_str) {
+            // ISO 字符串，直接格式化（已包含时区信息）
+            let formatted = dt.format("%Y-%m-%d %H:%M:%S").to_string();
+            let timestamp = dt.timestamp() as u64;
+            (formatted, timestamp)
+        } else {
+            // 非 ISO 字符串，尝试解析为时间戳
+            if let Some(ts_num) = pick_i64(item, &["created_at", "createdAt", "created", "timestamp", "time"]) {
+                let ts = ts_num as u64;
+                (fmt_timestamp(ts), ts)
+            } else {
+                (time_str.to_string(), 0)
+            }
+        }
+    } else if let Some(ts_num) = pick_i64(item, &["created_at", "createdAt", "created", "timestamp", "time"]) {
+        let ts = ts_num as u64;
+        (fmt_timestamp(ts), ts)
     } else {
-        "--".to_string()
+        ("--".to_string(), 0)
     };
 
     XiaomaLogItem { time, timestamp: ts, token_name, model, input_tokens, output_tokens, cost }
@@ -862,6 +879,301 @@ pub async fn jizhi_fetch(
     })
 }
 
+// ── 极智新版 API（jizhiapi.site 2026-08 更新后）──────────────
+// 认证：Authorization: Bearer <JWT>
+// 用户信息：GET /api/v1/auth/me → data.balance
+// 使用记录：GET /api/v1/usage → data.items[]，actual_cost 为实际费用
+
+fn parse_jizhi_new_log_item(item: &serde_json::Value) -> XiaomaLogItem {
+    let cost = pick_f64(item, &["actual_cost", "total_cost", "cost"]).unwrap_or(0.0);
+    let input_tokens = pick_i64(item, &["input_tokens", "prompt_tokens"]).unwrap_or(0);
+    let output_tokens = pick_i64(item, &["output_tokens", "completion_tokens"]).unwrap_or(0);
+    let model = pick_str(item, &["model"]).unwrap_or("--").to_string();
+    let token_name = pick_str(item, &["api_key.name", "group.name", "group"]).unwrap_or("--").to_string();
+
+    // created_at 是 ISO 字符串 "2026-08-20T20:12:46.035872+08:00"
+    let time_str = pick_str(item, &["created_at"]).unwrap_or("--");
+    let (time, ts) = if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(time_str) {
+        // 直接格式化为本地时间字符串，不要再调用 fmt_timestamp（它会重复加时区）
+        let formatted = dt.format("%Y-%m-%d %H:%M:%S").to_string();
+        let timestamp = dt.timestamp() as u64;
+        (formatted, timestamp)
+    } else {
+        (time_str.to_string(), 0)
+    };
+
+    XiaomaLogItem { time, timestamp: ts, token_name, model, input_tokens, output_tokens, cost }
+}
+
+#[command]
+pub async fn jizhi_new_fetch(
+    base_url: String,
+    bearer_token: String,
+    debug_mode: bool,
+) -> Result<XiaomaSnapshot, String> {
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let bearer = bearer_token.trim();
+    let base = base_url.trim_end_matches('/');
+
+    if bearer.is_empty() {
+        return Ok(XiaomaSnapshot {
+            wallet: XiaomaWallet { balance: 0.0, total_cost: 0.0, request_count: 0 },
+            recent_logs: vec![],
+            status: "cookie_missing".to_string(),
+            log_error: Some("未填写 Bearer Token".to_string()),
+            timestamp: now_ts,
+            debug_url: None,
+            debug_http_status: None,
+            debug_resp_keys: None,
+            debug_message: Some("未填写 Bearer Token".to_string()),
+        });
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("client: {}", e))?;
+
+    // 1. 用户信息
+    let me_url = format!("{}/api/v1/auth/me", base);
+    let me_req = client.get(&me_url)
+        .header("Authorization", format!("Bearer {}", bearer))
+        .header("Accept", "application/json");
+
+    let me_resp = me_req.send().await.map_err(|e| format!("network_error: {}", e))?;
+    let me_status = me_resp.status().as_u16();
+
+    if debug_mode {
+        eprintln!("[jizhi_new_fetch] /api/v1/auth/me status: {}", me_status);
+    }
+
+    if me_status == 401 || me_status == 403 {
+        return Ok(XiaomaSnapshot {
+            wallet: XiaomaWallet { balance: 0.0, total_cost: 0.0, request_count: 0 },
+            recent_logs: vec![],
+            status: "auth_error".to_string(),
+            log_error: Some(format!("HTTP {}", me_status)),
+            timestamp: now_ts,
+            debug_url: Some(me_url),
+            debug_http_status: Some(me_status),
+            debug_resp_keys: None,
+            debug_message: Some(format!("HTTP {}", me_status)),
+        });
+    }
+
+    let me_json: serde_json::Value = me_resp.json().await.map_err(|e| format!("parse_error: {}", e))?;
+    let data = me_json.get("data").unwrap_or(&me_json);
+    let balance = pick_f64(data, &["balance"]).unwrap_or(0.0);
+    // 尝试从用户信息获取总消耗，如果没有则设为 0（等使用记录接口获取）
+    let user_total_cost = pick_f64(data, &["total_cost", "used", "used_money", "total_used"])
+        .or_else(|| pick_f64(data, &["used_quota"]).map(quota_usd));
+
+    // 2. 使用记录
+    let usage_url = format!("{}/api/v1/usage?page=1&page_size=20", base);
+    let usage_req = client.get(&usage_url)
+        .header("Authorization", format!("Bearer {}", bearer))
+        .header("Accept", "application/json");
+
+    let (recent_logs, log_error, computed_total_cost, request_count) = match usage_req.send().await {
+        Err(e) => (vec![], Some(format!("网络失败: {}", e)), 0.0, 0),
+        Ok(resp) => {
+            let us = resp.status().as_u16();
+            if us < 200 || us >= 300 {
+                (vec![], Some(format!("使用记录 HTTP {}", us)), 0.0, 0)
+            } else {
+                match resp.json::<serde_json::Value>().await {
+                    Err(e) => (vec![], Some(format!("解析失败: {}", e)), 0.0, 0),
+                    Ok(uj) => {
+                        // 尝试从响应顶层获取 total 或 pagination 信息
+                        let total_from_resp = pick_f64(&uj, &["total_cost", "total_amount"]);
+                        let total_count = pick_i64(&uj, &["total", "total_count"]).unwrap_or(0);
+
+                        let raw = extract_logs(&uj);
+                        let logs: Vec<XiaomaLogItem> = raw.iter().map(parse_jizhi_new_log_item).collect();
+                        // 从使用记录累加（仅当前页的，可能不完整）
+                        let computed_cost: f64 = logs.iter().map(|log| log.cost).sum();
+                        let request_count = if total_count > 0 { total_count } else { logs.len() as i64 };
+                        (logs, None, total_from_resp.unwrap_or(computed_cost), request_count)
+                    }
+                }
+            }
+        }
+    };
+
+    // 优先使用用户信息接口的总消耗，如果没有则使用计算值
+    let total_cost = user_total_cost.unwrap_or(computed_total_cost);
+
+    let wallet = XiaomaWallet {
+        balance,
+        total_cost,
+        request_count,
+    };
+
+    Ok(XiaomaSnapshot {
+        wallet,
+        recent_logs,
+        status: "ok".to_string(),
+        log_error,
+        timestamp: now_ts,
+        debug_url: Some(me_url),
+        debug_http_status: Some(me_status),
+        debug_resp_keys: None,
+        debug_message: None,
+    })
+}
+
+// ── X网站 API（x-llm.net）─────────────────────────────────────
+// 认证：Authorization: Bearer <JWT>
+// 用户信息：返回 data.quota（剩余额度，单位 1/500000 美元）、data.used_quota
+// 使用记录：GET /api/log/self → data.items[]，quota 为费用（同单位），created_at 为 Unix 秒
+
+fn parse_xllm_log_item(item: &serde_json::Value) -> XiaomaLogItem {
+    let raw_quota = pick_f64(item, &["quota"]).unwrap_or(0.0);
+    let cost = quota_usd(raw_quota);
+    let input_tokens = pick_i64(item, &["prompt_tokens", "input_tokens"]).unwrap_or(0);
+    let output_tokens = pick_i64(item, &["completion_tokens", "output_tokens"]).unwrap_or(0);
+    let model = pick_str(item, &["model_name", "model"]).unwrap_or("--").to_string();
+    let token_name = pick_str(item, &["token_name", "username"]).unwrap_or("--").to_string();
+
+    // 时间：优先尝试解析 ISO 字符串，再尝试数字时间戳
+    let (time, ts) = if let Some(time_str) = pick_str(item, &["created_at", "time"]) {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(time_str) {
+            // ISO 字符串，直接格式化（已包含时区信息）
+            let formatted = dt.format("%Y-%m-%d %H:%M:%S").to_string();
+            let timestamp = dt.timestamp() as u64;
+            (formatted, timestamp)
+        } else if let Some(ts_num) = pick_i64(item, &["created_at", "timestamp"]) {
+            let ts = ts_num as u64;
+            (fmt_timestamp(ts), ts)
+        } else {
+            (time_str.to_string(), 0)
+        }
+    } else if let Some(ts_num) = pick_i64(item, &["created_at", "timestamp"]) {
+        let ts = ts_num as u64;
+        (fmt_timestamp(ts), ts)
+    } else {
+        ("--".to_string(), 0)
+    };
+
+    XiaomaLogItem { time, timestamp: ts, token_name, model, input_tokens, output_tokens, cost }
+}
+
+#[command]
+pub async fn xllm_fetch(
+    base_url: String,
+    bearer_token: String,
+    debug_mode: bool,
+) -> Result<XiaomaSnapshot, String> {
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let bearer = bearer_token.trim();
+    let base = base_url.trim_end_matches('/');
+
+    if bearer.is_empty() {
+        return Ok(XiaomaSnapshot {
+            wallet: XiaomaWallet { balance: 0.0, total_cost: 0.0, request_count: 0 },
+            recent_logs: vec![],
+            status: "cookie_missing".to_string(),
+            log_error: Some("未填写 Bearer Token".to_string()),
+            timestamp: now_ts,
+            debug_url: None,
+            debug_http_status: None,
+            debug_resp_keys: None,
+            debug_message: Some("未填写 Bearer Token".to_string()),
+        });
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("client: {}", e))?;
+
+    // 1. 用户信息（X 网站接口路径待确认，先用通用的 /api/user）
+    let user_url = format!("{}/api/user", base);
+    let user_req = client.get(&user_url)
+        .header("Authorization", format!("Bearer {}", bearer))
+        .header("Accept", "application/json");
+
+    let user_resp = user_req.send().await.map_err(|e| format!("network_error: {}", e))?;
+    let user_status = user_resp.status().as_u16();
+
+    if debug_mode {
+        eprintln!("[xllm_fetch] /api/user status: {}", user_status);
+    }
+
+    if user_status == 401 || user_status == 403 {
+        return Ok(XiaomaSnapshot {
+            wallet: XiaomaWallet { balance: 0.0, total_cost: 0.0, request_count: 0 },
+            recent_logs: vec![],
+            status: "auth_error".to_string(),
+            log_error: Some(format!("HTTP {}", user_status)),
+            timestamp: now_ts,
+            debug_url: Some(user_url),
+            debug_http_status: Some(user_status),
+            debug_resp_keys: None,
+            debug_message: Some(format!("HTTP {}", user_status)),
+        });
+    }
+
+    let user_json: serde_json::Value = user_resp.json().await.map_err(|e| format!("parse_error: {}", e))?;
+    let data = user_json.get("data").unwrap_or(&user_json);
+    let remain = pick_f64(data, &["quota"]).unwrap_or(0.0);
+    let used = pick_f64(data, &["used_quota"]).unwrap_or(0.0);
+    let req_count = pick_i64(data, &["request_count"]).unwrap_or(0);
+
+    let wallet = XiaomaWallet {
+        balance: quota_usd(remain),
+        total_cost: quota_usd(used),
+        request_count: req_count,
+    };
+
+    // 2. 使用记录
+    let end_ts = now_ts;
+    let start_ts = end_ts.saturating_sub(86400 * 7);
+    let log_url = format!("{}/api/log/self?p=1&page_size=20&start_timestamp={}&end_timestamp={}", base, start_ts, end_ts);
+    let log_req = client.get(&log_url)
+        .header("Authorization", format!("Bearer {}", bearer))
+        .header("Accept", "application/json");
+
+    let (recent_logs, log_error) = match log_req.send().await {
+        Err(e) => (vec![], Some(format!("网络失败: {}", e))),
+        Ok(resp) => {
+            let ls = resp.status().as_u16();
+            if ls < 200 || ls >= 300 {
+                (vec![], Some(format!("日志 HTTP {}", ls)))
+            } else {
+                match resp.json::<serde_json::Value>().await {
+                    Err(e) => (vec![], Some(format!("解析失败: {}", e))),
+                    Ok(lj) => {
+                        let raw = extract_logs(&lj);
+                        let logs: Vec<XiaomaLogItem> = raw.iter().map(parse_xllm_log_item).collect();
+                        (logs, None)
+                    }
+                }
+            }
+        }
+    };
+
+    Ok(XiaomaSnapshot {
+        wallet,
+        recent_logs,
+        status: "ok".to_string(),
+        log_error,
+        timestamp: now_ts,
+        debug_url: Some(user_url),
+        debug_http_status: Some(user_status),
+        debug_resp_keys: None,
+        debug_message: None,
+    })
+}
+
 // 时间戳(秒) → YYYY-MM-DD（东八区）
 fn fmt_date(ts: u64) -> String {
     let secs_local = ts + 8 * 3600;
@@ -882,9 +1194,27 @@ pub fn get_autostart_enabled(app: AppHandle) -> Result<bool, String> {
 pub fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt;
     let al = app.autolaunch();
-    if enabled {
-        al.enable().map_err(|e| e.to_string())
+
+    let result = if enabled {
+        al.enable()
     } else {
-        al.disable().map_err(|e| e.to_string())
-    }
+        al.disable()
+    };
+
+    result.map_err(|e| {
+        let err_str = e.to_string();
+        // Windows error 5 = Access Denied
+        if err_str.contains("os error 5") || err_str.contains("Access is denied") {
+            format!(
+                "开机启动设置失败：权限不足。\n\n可能的解决方案：\n\
+                1. 尝试以管理员身份运行本程序\n\
+                2. 检查防病毒软件是否拦截了注册表修改\n\
+                3. 暂时关闭此选项，手动添加开机启动项\n\n\
+                技术细节: {}",
+                err_str
+            )
+        } else {
+            format!("开机启动设置失败：{}", err_str)
+        }
+    })
 }

@@ -146,6 +146,10 @@ export default function FloatingWindow() {
   const animatingRef = useRef(false)
   const dockedPosRef = useRef<{ normalX: number; normalY: number; dockedX: number; dockedY: number } | null>(null)
 
+  // 本轮消耗：记录所有已见过的请求，累加新增的消费
+  const [sessionCost, setSessionCost] = useState(0)
+  const seenTimestampsRef = useRef<Set<number>>(new Set())
+
   // 统一入口：重新从 Rust 读最新 settings，然后刷新数据
   // 所有刷新路径（启动、按钮、事件、托盘）都走这里，避免闭包持有旧 settings
   const refreshWithLatestSettings = useCallback(async () => {
@@ -231,6 +235,24 @@ export default function FloatingWindow() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // 监听 snapshot 变化，累加新增消耗
+  useEffect(() => {
+    if (!snapshot || !snapshot.recentLogs) return
+
+    let newCost = 0
+    for (const log of snapshot.recentLogs) {
+      const ts = log.timestamp ?? 0
+      if (ts > 0 && !seenTimestampsRef.current.has(ts)) {
+        seenTimestampsRef.current.add(ts)
+        newCost += log.cost
+      }
+    }
+
+    if (newCost > 0) {
+      setSessionCost((prev) => prev + newCost)
+    }
+  }, [snapshot])
 
   useEffect(() => {
     if (record) checkLowBalance(record, settingsRef.current)
@@ -397,7 +419,6 @@ export default function FloatingWindow() {
   // 优先用 snapshot，无 snapshot 时降级用 record 旧字段
   const wallet = snapshot?.wallet
   const balance = wallet?.balance ?? record?.balance ?? null
-  const totalCost = wallet?.totalCost ?? record?.totalCost ?? null
   const requestCount = wallet?.requestCount ?? record?.requestCount ?? null
   const recentLogs = snapshot?.recentLogs ?? []
 
@@ -544,7 +565,7 @@ export default function FloatingWindow() {
           <div style={{ fontSize: 8, color: 'var(--text-dim)', marginTop: 1 }}>余额</div>
         </div>
         <div style={{ width: 1, background: 'rgba(255,255,255,0.05)', flexShrink: 0, margin: '2px 0' }} />
-        <StatCell label="历史消耗" value={totalCost !== null ? fmtUSD(totalCost) : '--'} />
+        <StatCell label="累积消耗" value={fmtUSD(sessionCost)} />
         <div style={{ width: 1, background: 'rgba(255,255,255,0.05)', flexShrink: 0, margin: '2px 0' }} />
         <StatCell label="请求次数" value={fmtInt(requestCount)} />
       </div>
