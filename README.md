@@ -74,9 +74,9 @@ NSIS 安装包会输出到 `src-tauri/target/release/bundle/nsis/`。
 
 | 字段 | 说明 |
 | --- | --- |
-| 配置名称 | 自定义显示名，例如「小马API」「极智API」 |
-| 适配器类型 | `mock` / 小马·New API 系（Cookie）/ 极智 API（Token） |
-| 中转站地址 | 例如 `https://xiaoma.best`、`https://jizhiapi.site` |
+| 配置名称 | 自定义显示名 |
+| 适配器类型 | `mock` / New API 系（Cookie）/  API（Token） |
+| 中转站地址 | 例如 `https://xxx.best`、`https://xxx.site` |
 | Cookie | New API 系：从浏览器复制，格式 `session=xxx`；极智可留空 |
 | API Token | 极智：粘贴 `Authorization: Bearer` 后的 JWT（必填）；New API 系可选 |
 | New-Api-User | 仅 New API / One API 系需要（极智不显示） |
