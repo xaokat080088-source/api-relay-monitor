@@ -77,9 +77,10 @@ pub fn mask_cookie(cookie: &str) -> String {
 //         account = "jizhi-<profile_id>"，DPAPI 持久化）。
 // 存储 2：DPAPI 加密本地文件 jizhi_credentials.json（仅当前 Windows 用户可解密）。
 //
-// 为什么双备份：凭据管理器条目可能被本机清理软件/系统维护等外部因素清掉
-// （实际发生过），单一存储会静默失效。读取时先凭据管理器、后加密文件，
-// 任一存活即可自动登录；文件兜底命中后还会回写修复另一侧。
+// 为什么双备份：keyring 3 在 Windows 上必须开 windows-native feature 才真正写凭据管理器，
+// 否则默认是进程内 mock 存储（不落盘，重启或新建 Entry 即读不到）——早期版本就栽在这里。
+// 现在两处都真实落盘：读取时先凭据管理器、后加密文件，任一存活即可自动登录，
+// 文件兜底命中后还会回写修复凭据管理器。
 
 const KEYRING_SERVICE: &str = "api-monitor";
 
@@ -230,9 +231,8 @@ fn now_secs() -> u64 {
 /// 密码为空 = 清除该 profile 的全部极智凭据。
 pub fn save_jizhi_credentials(app: &AppHandle, profile_id: &str, username: &str, password: &str) -> Result<(), String> {
     if password.is_empty() {
-        // 清除：keyring + 加密文件条目 + 账号镜像
+        // 清除：凭据管理器条目 + 加密文件条目（含账号镜像）
         delete_jizhi_password(profile_id);
-        crate::credential_store::delete_jizhi_username(profile_id);
         with_cred_file(app, |file| {
             file.profiles.remove(profile_id);
         });
@@ -305,11 +305,6 @@ pub fn delete_jizhi_password(profile_id: &str) {
     if let Ok(entry) = jizhi_entry(profile_id) {
         let _ = entry.delete_credential();
     }
-}
-
-/// 删除极智账号 keyring 镜像（兼容保留：账号镜像现以加密文件为主）
-pub fn delete_jizhi_username(profile_id: &str) {
-    let _ = profile_id;
 }
 
 /// 兼容旧调用：仅保存密码（无账号信息）到双存储

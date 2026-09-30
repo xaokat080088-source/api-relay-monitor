@@ -1,6 +1,6 @@
 [package]
 name = "api-monitor"
-version = "1.0.0"
+version = "2.3.0"
 description = "API balance monitor floating window"
 authors = ["you"]
 edition = "2021"
@@ -30,6 +30,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
-keyring = "3"
+# windows-native 必须显式开启，否则 keyring 3 在 Windows 上默认是进程内 mock 存储（不落盘）
+keyring = { version = "3", features = ["windows-native"] }
 base64 = "0.22"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory"] }

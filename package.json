@@ -1,6 +1,6 @@
 {
   "name": "api-monitor",
-  "version": "1.0.0",
+  "version": "2.3.0",
   "description": "API balance monitor floating window",
   "scripts": {
     "dev:renderer": "vite --host 127.0.0.1 --port 5174",
