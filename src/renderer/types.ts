@@ -49,6 +49,8 @@ export interface StationProfile {
   cookie: string
   apiToken: string
   newApiUser: string
+  // 极智自动登录账号（密码不存这里，存 Windows 凭据管理器）
+  jizhiUsername?: string
   // 运行时注入，不持久化
   _sessionCookie?: string
 }
@@ -77,6 +79,7 @@ export function makeDefaultProfile(): StationProfile {
     cookie: '',
     apiToken: '',
     newApiUser: '',
+    jizhiUsername: '',
   }
 }
 

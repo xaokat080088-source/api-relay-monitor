@@ -91,6 +91,12 @@ export default function SettingsWindow() {
   const [clearing, setClearing] = useState(false)
   const [autostartError, setAutostartError] = useState('')
 
+  // 极智自动登录（密码不回显，只在输入时更新；空 = 未改动）
+  const [jizhiPassword, setJizhiPassword] = useState('')
+  const [showJizhiPassword, setShowJizhiPassword] = useState(false)
+  const [jizhiLoginState, setJizhiLoginState] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [jizhiLoggingIn, setJizhiLoggingIn] = useState(false)
+
   // 测试连接
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<TestResult | null>(null)
@@ -171,8 +177,9 @@ export default function SettingsWindow() {
     setG((prev) => ({ ...prev, profiles: remain, activeProfileId: nextActive }))
     setEditingId(remain[0].id)
     setTestResult(null)
-    // 清掉被删 profile 的历史文件（可选，忽略失败）
+    // 清掉被删 profile 的历史文件和凭据管理器里存的密码（可选，忽略失败）
     tauriAPI.clearHistory(editingId).catch(() => {})
+    tauriAPI.jizhiSavePassword(editingId, '').catch(() => {})
   }
 
   const switchEditing = (id: string) => {
@@ -259,16 +266,17 @@ export default function SettingsWindow() {
         }
         snap = await tauriAPI.jizhiFetch(baseUrl, effectiveToken, effectiveCookie || null, g.debugMode ?? false)
       } else if (editing.providerType === 'jizhi_new') {
-        // 极智新版：Bearer JWT 认证
-        if (!effectiveToken) {
+        // 极智新版：Bearer JWT 认证（配置自动登录账号后 Token 可空，由后端自动登录）
+        const hasAutoLogin = !!(editing.jizhiUsername || '').trim()
+        if (!effectiveToken && !hasAutoLogin) {
           setTestResult({
             ok: false,
-            error: '极智新版 API 需要 Bearer Token，请把 Authorization 里的 JWT 填到 API Token 字段',
+            error: '极智新版 API 需要 Bearer Token，或填好下方「自动登录」账号后由组件自动登录',
             errorType: 'AUTH',
           })
           return
         }
-        snap = await tauriAPI.jizhiNewFetch(baseUrl, effectiveToken, g.debugMode ?? false)
+        snap = await tauriAPI.jizhiNewFetch(baseUrl, effectiveToken, editing.id, g.debugMode ?? false)
       } else if (editing.providerType === 'xllm') {
         // X网站：Bearer JWT 认证
         if (!effectiveToken) {
@@ -421,6 +429,16 @@ export default function SettingsWindow() {
     if (!result.profiles.some((p) => p.id === editingId) && result.profiles[0]) {
       setEditingId(result.profiles[0].id)
     }
+    // 极智密码：输入框有值则写入 Windows 凭据管理器（密码不进 settings.json）
+    if (jizhiPassword) {
+      try {
+        await tauriAPI.jizhiSavePassword(editingId, jizhiPassword)
+        setJizhiPassword('')
+        setJizhiLoginState({ ok: true, msg: '密码已保存' })
+      } catch (e) {
+        setJizhiLoginState({ ok: false, msg: `密码保存失败：${String(e)}` })
+      }
+    }
     tauriAPI.setAlwaysOnTop(result.alwaysOnTop)
     try {
       await tauriAPI.setAutostartEnabled(result.autoLaunch)
@@ -435,6 +453,42 @@ export default function SettingsWindow() {
     setSaved(true)
     setTimeout(() => setSaved(false), 1800)
   }
+
+  // 极智「测试登录」：验证账密，成功后 Rust 侧自动保存密码+账号+新 Token
+  const handleJizhiLogin = async () => {
+    if (!editing) return
+    const username = (editing.jizhiUsername || '').trim()
+    if (!username || !jizhiPassword) {
+      setJizhiLoginState({ ok: false, msg: '请先填写账号和密码' })
+      return
+    }
+    setJizhiLoggingIn(true)
+    setJizhiLoginState(null)
+    try {
+      const r = await tauriAPI.jizhiLogin(
+        editing.id,
+        editing.baseUrl || 'https://jizhiapi.site',
+        username,
+        jizhiPassword,
+        g.debugMode ?? false,
+      )
+      setJizhiLoginState({ ok: true, msg: `登录成功，余额 $${r.balance.toFixed(2)}，已记住账号密码` })
+      setJizhiPassword('')
+      // Rust 侧已把账号+新 Token 写进 settings，广播给悬浮窗同步，再重新加载同步到界面
+      await tauriAPI.broadcastSettingsChanged()
+      await reload()
+    } catch (e) {
+      setJizhiLoginState({ ok: false, msg: `登录失败：${String(e)}` })
+    } finally {
+      setJizhiLoggingIn(false)
+    }
+  }
+
+  // 切换编辑对象时清空密码输入与登录状态
+  useEffect(() => {
+    setJizhiPassword('')
+    setJizhiLoginState(null)
+  }, [editingId])
 
   const handleClearHistory = async () => {
     if (!editing) return
@@ -647,9 +701,11 @@ export default function SettingsWindow() {
               value={editing.apiToken}
               onChange={(e) => updateProfile({ apiToken: e.target.value })}
               placeholder={
-                (editing.providerType === 'jizhi' || editing.providerType === 'jizhi_new' || editing.providerType === 'xllm')
-                  ? '粘贴 Authorization 里的 Bearer JWT（必填）'
-                  : 'Bearer Token（可选）'
+                editing.providerType === 'jizhi_new'
+                  ? 'Bearer JWT（配置下方自动登录后可不填）'
+                  : (editing.providerType === 'jizhi' || editing.providerType === 'xllm')
+                    ? '粘贴 Authorization 里的 Bearer JWT（必填）'
+                    : 'Bearer Token（可选）'
               }
               autoComplete="off"
               spellCheck={false}
@@ -667,10 +723,77 @@ export default function SettingsWindow() {
           </div>
           {(editing.providerType === 'jizhi' || editing.providerType === 'jizhi_new' || editing.providerType === 'xllm') && (
             <div style={{ fontSize: 10, color: '#5a5a6a', marginTop: 4 }}>
-              F12 → 网络 → 找到 API 请求 → 请求标头里 <code>Authorization: Bearer</code> 后面那一长串 JWT
+              {editing.providerType === 'jizhi_new'
+                ? '极智新版推荐用下方「自动登录」，此项可不填'
+                : <>F12 → 网络 → 找到 API 请求 → 请求标头里 <code>Authorization: Bearer</code> 后面那一长串 JWT</>}
             </div>
           )}
         </Row>
+
+        {/* 极智新版：自动登录（账号密码，Token 过期自动续期） */}
+        {editing.providerType === 'jizhi_new' && (
+          <>
+            <Row label="自动登录账号">
+              <input
+                style={inputStyle}
+                type="text"
+                value={editing.jizhiUsername ?? ''}
+                onChange={(e) => updateProfile({ jizhiUsername: e.target.value })}
+                placeholder="极智官网登录账号（手机号/邮箱/用户名）"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </Row>
+            <Row label="自动登录密码">
+              <div style={{ position: 'relative' }}>
+                <input
+                  style={{ ...inputStyle, paddingRight: 30 }}
+                  type={showJizhiPassword ? 'text' : 'password'}
+                  value={jizhiPassword}
+                  onChange={(e) => setJizhiPassword(e.target.value)}
+                  placeholder={jizhiPassword ? '' : '已保存（输入新密码可覆盖）'}
+                  autoComplete="new-password"
+                  spellCheck={false}
+                />
+                <button
+                  onClick={() => setShowJizhiPassword(!showJizhiPassword)}
+                  style={{
+                    position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)',
+                    background: 'none', border: 'none', color: '#5a5a6a', cursor: 'pointer',
+                    padding: 0, display: 'flex',
+                  }}
+                >
+                  {showJizhiPassword ? <EyeOff size={12} /> : <Eye size={12} />}
+                </button>
+              </div>
+              <div style={{ fontSize: 10, color: '#5a5a6a', marginTop: 4 }}>
+                密码用 Windows 凭据管理器加密存本机，不上传。填好并保存后，Token 过期会自动重新登录，无需再手动抓取。
+              </div>
+            </Row>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
+              <button
+                onClick={handleJizhiLogin}
+                disabled={jizhiLoggingIn}
+                style={{
+                  ...btnBase,
+                  background: 'rgba(124,111,247,0.15)',
+                  border: '1px solid rgba(124,111,247,0.35)',
+                  color: '#a89ff9',
+                }}
+              >
+                {jizhiLoggingIn
+                  ? <RefreshCw size={12} style={{ animation: 'spin 1s linear infinite' }} />
+                  : <CheckCircle size={12} />}
+                测试登录并记住密码
+              </button>
+              {jizhiLoginState && (
+                <span style={{ fontSize: 10, color: jizhiLoginState.ok ? '#4ade80' : '#f87171' }}>
+                  {jizhiLoginState.msg}
+                </span>
+              )}
+            </div>
+          </>
+        )}
 
         {/* New-Api-User（仅小马等 Cookie 认证站需要） */}
         {editing.providerType === 'xiaoma' && (
@@ -936,6 +1059,15 @@ export default function SettingsWindow() {
           borderRadius: 5,
         }}>
           Token 等同于登录凭证，只保存在本机，不要发给别人。Token 过期后需重新复制。
+        </div>
+        <div style={{
+          marginTop: 8, fontSize: 11, color: '#a89ff9', lineHeight: 1.8,
+          background: 'rgba(124,111,247,0.08)',
+          border: '1px solid rgba(124,111,247,0.25)',
+          borderRadius: 5,
+          padding: '8px 12px',
+        }}>
+          ⭐ 推荐做法：不用手动抓 Token。直接在上方「自动登录」填入官网账号和密码，点「测试登录并记住密码」——以后 Token 过期组件会自动重新登录续期，全程无需操作。
         </div>
       </div>
       )}

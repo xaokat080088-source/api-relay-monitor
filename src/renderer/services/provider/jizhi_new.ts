@@ -13,22 +13,33 @@ export const JizhiNewProvider: Provider = {
   async fetch({ profile, debugMode }: ProviderContext): Promise<BalanceRecord> {
     const bearer = (profile.apiToken || '').trim()
     const baseUrl = (profile.baseUrl || 'https://jizhiapi.site').trim()
+    // 配置了自动登录账号时，token 为空也可由 Rust 侧自动登录获取
+    const hasAutoLogin = !!(profile.jizhiUsername || '').trim()
 
-    if (!bearer) {
+    if (!bearer && !hasAutoLogin) {
       const snapshot: BalanceSnapshot = {
         wallet: { balance: 0, totalCost: 0, requestCount: 0 },
         recentLogs: [],
         source: 'jizhi_new',
         status: 'cookie_missing',
         timestamp: Date.now(),
-        logError: '未填写 Bearer Token',
+        logError: '未填写 Token，也未配置自动登录账号',
       }
       throw Object.assign(new Error('COOKIE_MISSING'), { snapshot })
     }
 
-    // 调用 Rust 后端的 jizhi_new_fetch 命令
+    // 调用 Rust 后端的 jizhi_new_fetch 命令（Token 过期时后端自动账密续期）
     try {
-      const snap = await tauriAPI.jizhiNewFetch(baseUrl, bearer, debugMode ?? false)
+      const snap = await tauriAPI.jizhiNewFetch(baseUrl, bearer, profile.id, debugMode ?? false)
+
+      // 后端自动续期成功：把新 token 回写 settings（settings.json 由 Rust 侧已写，这里同步兜底）
+      if (snap.renewedToken) {
+        try {
+          await tauriAPI.updateProfileToken(profile.id, snap.renewedToken)
+        } catch {
+          // 回写失败不影响本次数据展示，下次续期会再试
+        }
+      }
 
       if (snap.status === 'auth_error') {
         const snapshot: BalanceSnapshot = {

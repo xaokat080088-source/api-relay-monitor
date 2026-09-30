@@ -166,12 +166,13 @@ export default function FloatingWindow() {
   }, [])
 
   // 切换到下一个中转站（点标题循环切换）
+  // 只改 activeProfileId，不用内存里的旧 profiles 覆盖设置（否则会丢掉设置页刚保存的账号等字段）
   const handleSwitchProfile = useCallback(async () => {
     const cur = settingsRef.current
     if (!cur.profiles || cur.profiles.length < 2) return
     const idx = cur.profiles.findIndex((p) => p.id === cur.activeProfileId)
     const next = cur.profiles[(idx + 1) % cur.profiles.length]
-    await tauriAPI.saveSettings({ ...cur, activeProfileId: next.id })
+    await tauriAPI.setActiveProfile(next.id)
     await refreshWithLatestSettings()
   }, [refreshWithLatestSettings])
 
@@ -456,7 +457,7 @@ export default function FloatingWindow() {
     if (errorStatus === 'cookie_missing') return '未配置 Cookie，请在设置中填写'
     if (errorStatus === 'new_api_user_missing') return '缺少 New-Api-User，请在设置中填写'
     if (errorStatus === 'balance_insufficient') return '余额/额度不足，请充值'
-    if (errorStatus === 'auth_error') return '认证失败，请检查 Cookie 是否有效'
+    if (errorStatus === 'auth_error') return 'Token 已失效，将自动重新登录…'
     if (errorStatus === 'network_error') return '网络连接失败'
     return '数据解析失败'
   }

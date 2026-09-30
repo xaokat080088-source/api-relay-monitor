@@ -1,5 +1,5 @@
 use tauri::{AppHandle, Manager, Emitter, command};
-use crate::store::{AppSettings, BalanceRecord, read_settings, write_settings, read_history, write_history};
+use crate::store::{AppSettings, BalanceRecord, read_settings, read_history, write_history};
 use crate::credential_store::{SessionData, read_session, write_session, clear_session, mask_cookie};
 
 #[command]
@@ -9,7 +9,7 @@ pub fn get_settings(app: AppHandle) -> AppSettings {
 
 #[command]
 pub fn save_settings(app: AppHandle, settings: AppSettings) -> AppSettings {
-    write_settings(&app, &settings);
+    crate::store::write_settings_locked(&app, &settings);
     settings
 }
 
@@ -67,10 +67,11 @@ pub fn set_always_on_top(app: AppHandle, on_top: bool) {
 pub fn move_window(app: AppHandle, x: i32, y: i32) {
     if let Some(win) = app.get_webview_window("floating") {
         let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
-        let mut s = read_settings(&app);
-        s.window_x = x;
-        s.window_y = y;
-        write_settings(&app, &s);
+        // 拖动高频触发，锁内只改坐标两个字段，避免覆盖其他并发写入
+        crate::store::update_settings(&app, |s| {
+            s.window_x = x;
+            s.window_y = y;
+        });
     }
 }
 
@@ -291,6 +292,9 @@ pub struct XiaomaSnapshot {
     pub debug_http_status: Option<u16>,
     pub debug_resp_keys: Option<String>,   // 顶层字段名，逗号分隔
     pub debug_message: Option<String>,     // 接口返回的 message/error 字段
+    // 自动续期：账密重新登录成功后携带新 token（前端回写 profile）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renewed_token: Option<String>,
 }
 
 const QUOTA_TO_USD: f64 = 500_000.0;
@@ -437,6 +441,7 @@ pub async fn xiaoma_fetch(
             debug_http_status: None,
             debug_resp_keys: None,
             debug_message: None,
+            renewed_token: None,
         });
     }
 
@@ -479,6 +484,7 @@ pub async fn xiaoma_fetch(
                 debug_http_status: None,
                 debug_resp_keys: None,
                 debug_message: None,
+                renewed_token: None,
             });
         }
         Ok(r) => r,
@@ -519,6 +525,7 @@ pub async fn xiaoma_fetch(
             debug_http_status: Some(user_status),
             debug_resp_keys: None,
             debug_message: api_msg,
+            renewed_token: None,
         });
     }
     if user_status < 200 || user_status >= 300 {
@@ -534,6 +541,7 @@ pub async fn xiaoma_fetch(
             debug_http_status: Some(user_status),
             debug_resp_keys: None,
             debug_message: None,
+            renewed_token: None,
         });
     }
 
@@ -549,6 +557,7 @@ pub async fn xiaoma_fetch(
                 debug_http_status: Some(user_status),
                 debug_resp_keys: None,
                 debug_message: None,
+                renewed_token: None,
             });
         }
         Ok(v) => v,
@@ -581,6 +590,7 @@ pub async fn xiaoma_fetch(
             debug_http_status: Some(user_status),
             debug_resp_keys: Some(top_keys),
             debug_message: Some(msg.to_string()),
+            renewed_token: None,
         });
     }
 
@@ -664,6 +674,7 @@ pub async fn xiaoma_fetch(
         debug_http_status: Some(user_status),
         debug_resp_keys: Some(top_keys),
         debug_message: None,
+        renewed_token: None,
     })
 }
 
@@ -743,6 +754,7 @@ pub async fn jizhi_fetch(
         debug_http_status: http,
         debug_resp_keys: None,
         debug_message: msg,
+        renewed_token: None,
     };
 
     if bearer.is_empty() {
@@ -876,6 +888,7 @@ pub async fn jizhi_fetch(
         debug_http_status: Some(me_status),
         debug_resp_keys: Some(top_keys),
         debug_message: None,
+        renewed_token: None,
     })
 }
 
@@ -905,33 +918,279 @@ fn parse_jizhi_new_log_item(item: &serde_json::Value) -> XiaomaLogItem {
     XiaomaLogItem { time, timestamp: ts, token_name, model, input_tokens, output_tokens, cost }
 }
 
+// ── 极智自动登录 / Token 自动续期 ────────────────────────────
+
+use std::sync::atomic::{AtomicI64, Ordering};
+
+/// 续期失败后的冷却截止时间戳（秒）。5 分钟内不再自动撞登录接口。
+static JIZHI_RENEW_COOLDOWN_UNTIL: AtomicI64 = AtomicI64::new(0);
+
+fn jizhi_renew_allowed() -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    now >= JIZHI_RENEW_COOLDOWN_UNTIL.load(Ordering::Relaxed)
+}
+
+fn jizhi_renew_mark_failure() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    JIZHI_RENEW_COOLDOWN_UNTIL.store(now + 300, Ordering::Relaxed);
+}
+
+/// 从 settings 读账号 + 凭据存储（keyring→DPAPI 文件兜底）读密码；任一缺失返回 None。
+/// settings 里账号丢失时（曾被并发覆盖等），尝试从加密文件镜像恢复并回写 settings。
+fn load_jizhi_credentials(app: &AppHandle, profile_id: &str) -> Option<(String, String)> {
+    let settings = read_settings(app);
+    let profile = settings.profiles.iter().find(|p| p.id == profile_id)?;
+    let mut username = profile
+        .jizhi_username
+        .clone()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    // 兜底自愈：settings 丢账号但加密文件镜像还在 → 恢复账号回写 settings
+    if username.is_empty() {
+        if let Some(mirrored) = crate::credential_store::load_jizhi_username(app, profile_id) {
+            username = mirrored;
+            let pid = profile_id.to_string();
+            let uname = username.clone();
+            crate::store::update_settings(app, move |s| {
+                if let Some(p) = s.profiles.iter_mut().find(|p| p.id == pid) {
+                    p.jizhi_username = Some(uname);
+                }
+            });
+        }
+    }
+
+    if username.is_empty() {
+        return None;
+    }
+    let password = crate::credential_store::load_jizhi_password(app, profile_id)?;
+    if password.is_empty() {
+        return None;
+    }
+    Some((username, password))
+}
+
+/// 把续期得到的新 token 写回 profile（settings.json，锁内读改写防并发覆盖）
+fn persist_profile_token(app: &AppHandle, profile_id: &str, token: &str) {
+    crate::store::update_settings(app, |s| {
+        if let Some(p) = s.profiles.iter_mut().find(|p| p.id == profile_id) {
+            p.api_token = token.to_string();
+        }
+    });
+}
+
+fn persist_profile_credentials(app: &AppHandle, profile_id: &str, username: &str, token: &str) {
+    crate::store::update_settings(app, |s| {
+        if let Some(p) = s.profiles.iter_mut().find(|p| p.id == profile_id) {
+            p.jizhi_username = Some(username.to_string());
+            p.api_token = token.to_string();
+        }
+    });
+}
+
+fn mask_token_preview(token: &str) -> String {
+    if token.len() <= 12 {
+        "***".to_string()
+    } else {
+        format!("{}…{}", &token[..6], &token[token.len() - 4..])
+    }
+}
+
+/// 从登录响应提取 token：顶层 / data / data.data 里的 token / access_token / jwt
+fn extract_login_token(json: &serde_json::Value) -> Option<String> {
+    let data = json.get("data").unwrap_or(json);
+    let data2 = data.get("data").unwrap_or(data);
+    for c in [json, data, data2] {
+        if let Some(t) = pick_str(c, &["token", "access_token", "jwt"]) {
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 自适应登录极智：多组 接口路径 × 请求体格式 顺序尝试，命中即返回 JWT。
+/// 未抓包确认过登录接口，按极智新版 API 风格穷举常见组合。
+async fn jizhi_auto_login(base: &str, username: &str, password: &str, debug_mode: bool) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("client: {}", e))?;
+
+    let paths = ["/api/v1/auth/login", "/api/user/login"];
+    let bodies = [
+        serde_json::json!({ "username": username, "password": password }),
+        serde_json::json!({ "email": username, "password": password }),
+    ];
+
+    let mut last_status = 0u16;
+    let mut last_info = String::from("未尝试任何请求");
+
+    for path in paths {
+        let url = format!("{}{}", base, path);
+        for body in &bodies {
+            let resp = match client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .json(body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                // 网络失败与路径/字段组合无关，直接终止
+                Err(e) => return Err(format!("网络请求失败: {}", e)),
+            };
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            let preview: String = text.chars().take(150).collect();
+
+            if debug_mode {
+                eprintln!("[jizhi_login] POST {} -> {} {}", url, status, preview);
+            }
+
+            if (200..300).contains(&status) {
+                match serde_json::from_str::<serde_json::Value>(&text) {
+                    Ok(json) => {
+                        if let Some(t) = extract_login_token(&json) {
+                            return Ok(t);
+                        }
+                        let keys = json
+                            .as_object()
+                            .map(|o| o.keys().cloned().collect::<Vec<_>>().join(", "))
+                            .unwrap_or_else(|| "(非对象)".into());
+                        last_status = status;
+                        last_info = format!("响应 2xx 但未找到 token 字段（顶层字段: {}）", keys);
+                    }
+                    Err(_) => {
+                        last_status = status;
+                        last_info = format!("响应非 JSON: {}", preview);
+                    }
+                }
+            } else {
+                last_status = status;
+                last_info = preview;
+            }
+        }
+    }
+
+    Err(format!("HTTP {} {}", last_status, last_info))
+}
+
+/// 用 keyring 账密自动登录。
+/// Ok(Some(token)) = 登录成功；Ok(None) = 未配置账密（静默跳过）；Err(msg) = 配置了但登录失败/冷却中。
+async fn try_jizhi_renew(app: &AppHandle, profile_id: &str, base: &str, debug_mode: bool) -> Result<Option<String>, String> {
+    let Some((username, password)) = load_jizhi_credentials(app, profile_id) else {
+        return Ok(None);
+    };
+    if !jizhi_renew_allowed() {
+        return Err("自动登录冷却中（上次登录失败，5 分钟后自动重试），也可检查账号密码后手动测试连接".to_string());
+    }
+    match jizhi_auto_login(base, &username, &password, debug_mode).await {
+        Ok(token) => Ok(Some(token)),
+        Err(e) => {
+            jizhi_renew_mark_failure();
+            Err(format!("自动登录失败（请检查账号密码）：{}", e))
+        }
+    }
+}
+
 #[command]
 pub async fn jizhi_new_fetch(
+    app: AppHandle,
+    profile_id: String,
     base_url: String,
     bearer_token: String,
     debug_mode: bool,
 ) -> Result<XiaomaSnapshot, String> {
+    let base = base_url.trim_end_matches('/').to_string();
+
+    // ── 有 token：直接请求；401 时尝试自动续期后重试 ──
+    let bearer = bearer_token.trim().to_string();
+    if !bearer.is_empty() {
+        let snap = jizhi_new_fetch_inner(&base, &bearer, debug_mode).await?;
+        if snap.status == "auth_error" {
+            match try_jizhi_renew(&app, &profile_id, &base, debug_mode).await {
+                Ok(Some(token)) => {
+                    let mut snap2 = jizhi_new_fetch_inner(&base, &token, debug_mode).await?;
+                    persist_profile_token(&app, &profile_id, &token);
+                    snap2.renewed_token = Some(token);
+                    return Ok(snap2);
+                }
+                Ok(None) => return Ok(snap),
+                Err(msg) => {
+                    let mut s = snap;
+                    s.log_error = Some(msg);
+                    return Ok(s);
+                }
+            }
+        }
+        return Ok(snap);
+    }
+
+    // ── 无 token：有账密则自动登录拉取 ──
+    match try_jizhi_renew(&app, &profile_id, &base, debug_mode).await {
+        Ok(Some(token)) => {
+            let mut snap = jizhi_new_fetch_inner(&base, &token, debug_mode).await?;
+            persist_profile_token(&app, &profile_id, &token);
+            snap.renewed_token = Some(token);
+            return Ok(snap);
+        }
+        Ok(None) => {}
+        Err(msg) => {
+            let now_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            return Ok(XiaomaSnapshot {
+                wallet: XiaomaWallet { balance: 0.0, total_cost: 0.0, request_count: 0 },
+                recent_logs: vec![],
+                status: "auth_error".to_string(),
+                log_error: Some(msg),
+                timestamp: now_ts,
+                debug_url: None,
+                debug_http_status: None,
+                debug_resp_keys: None,
+                debug_message: None,
+                renewed_token: None,
+            });
+        }
+    }
+
+    // ── token 和账密都没有 ──
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Ok(XiaomaSnapshot {
+        wallet: XiaomaWallet { balance: 0.0, total_cost: 0.0, request_count: 0 },
+        recent_logs: vec![],
+        status: "cookie_missing".to_string(),
+        log_error: Some("未填写 Token，也未配置自动登录账号；请到设置页填写".to_string()),
+        timestamp: now_ts,
+        debug_url: None,
+        debug_http_status: None,
+        debug_resp_keys: None,
+        debug_message: None,
+        renewed_token: None,
+    })
+}
+
+async fn jizhi_new_fetch_inner(base: &str, bearer: &str, debug_mode: bool) -> Result<XiaomaSnapshot, String> {
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    let bearer = bearer_token.trim();
-    let base = base_url.trim_end_matches('/');
-
-    if bearer.is_empty() {
-        return Ok(XiaomaSnapshot {
-            wallet: XiaomaWallet { balance: 0.0, total_cost: 0.0, request_count: 0 },
-            recent_logs: vec![],
-            status: "cookie_missing".to_string(),
-            log_error: Some("未填写 Bearer Token".to_string()),
-            timestamp: now_ts,
-            debug_url: None,
-            debug_http_status: None,
-            debug_resp_keys: None,
-            debug_message: Some("未填写 Bearer Token".to_string()),
-        });
-    }
+    let base = base.trim_end_matches('/');
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -962,6 +1221,7 @@ pub async fn jizhi_new_fetch(
             debug_http_status: Some(me_status),
             debug_resp_keys: None,
             debug_message: Some(format!("HTTP {}", me_status)),
+            renewed_token: None,
         });
     }
 
@@ -1023,7 +1283,93 @@ pub async fn jizhi_new_fetch(
         debug_http_status: Some(me_status),
         debug_resp_keys: None,
         debug_message: None,
+        renewed_token: None,
     })
+}
+
+// ── 极智账密管理 / 手动登录测试 ──────────────────────────────
+
+/// 保存极智密码到双存储（凭据管理器 + DPAPI 加密文件，密码不进 settings.json）。
+/// 空串 = 清除该配置的全部极智凭据。
+#[command]
+pub fn jizhi_save_password(app: AppHandle, profile_id: String, password: String) -> Result<(), String> {
+    if password.is_empty() {
+        crate::credential_store::save_jizhi_credentials(&app, &profile_id, "", "")
+    } else {
+        crate::credential_store::save_jizhi_password(&app, &profile_id, &password)
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JizhiLoginResult {
+    /// 掩码预览（不含完整 token）
+    pub token_masked: String,
+    pub balance: f64,
+}
+
+/// 手动登录测试：自适应登录 → 验证 → 密码入凭据管理器、账号+新 token 落盘 settings。
+async fn jizhi_fetch_balance(base: &str, bearer: &str) -> Option<f64> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .ok()?;
+    let resp = client
+        .get(format!("{}/api/v1/auth/me", base))
+        .header("Authorization", format!("Bearer {}", bearer))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .ok()?;
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let data = json.get("data").unwrap_or(&json);
+    pick_f64(data, &["balance"])
+}
+
+#[command]
+pub async fn jizhi_login(
+    app: AppHandle,
+    profile_id: String,
+    base_url: String,
+    username: String,
+    password: String,
+    debug_mode: bool,
+) -> Result<JizhiLoginResult, String> {
+    let base = base_url.trim_end_matches('/').to_string();
+    let username = username.trim().to_string();
+    if username.is_empty() || password.is_empty() {
+        return Err("账号或密码为空".to_string());
+    }
+
+    let token = jizhi_auto_login(&base, &username, &password, debug_mode).await?;
+    let balance = jizhi_fetch_balance(&base, &token).await.unwrap_or(0.0);
+
+    // 密码双存储（keyring + DPAPI 加密文件）；账号 + 新 token 写回 settings
+    crate::credential_store::save_jizhi_credentials(&app, &profile_id, &username, &password)?;
+    persist_profile_credentials(&app, &profile_id, &username, &token);
+
+    // 登录成功说明之前若有冷却记录已失效，清除冷却
+    JIZHI_RENEW_COOLDOWN_UNTIL.store(0, Ordering::Relaxed);
+
+    Ok(JizhiLoginResult {
+        token_masked: mask_token_preview(&token),
+        balance,
+    })
+}
+
+/// 前端收到 renewed_token 后回写 profile（也可由 Rust 侧直接 persist，此 command 兜底同步用）
+#[command]
+pub fn update_profile_token(app: AppHandle, profile_id: String, token: String) {
+    persist_profile_token(&app, &profile_id, &token);
+}
+
+/// 悬浮窗切换当前监控的中转站：锁内只改 activeProfileId，
+/// 不让悬浮窗用内存里的旧 profiles 全量覆盖设置页刚保存的配置（曾导致账号丢失）
+#[command]
+pub fn set_active_profile(app: AppHandle, profile_id: String) {
+    crate::store::update_settings(&app, move |s| {
+        s.active_profile_id = profile_id;
+    });
 }
 
 // ── X网站 API（x-llm.net）─────────────────────────────────────
@@ -1087,6 +1433,7 @@ pub async fn xllm_fetch(
             debug_http_status: None,
             debug_resp_keys: None,
             debug_message: Some("未填写 Bearer Token".to_string()),
+            renewed_token: None,
         });
     }
 
@@ -1119,6 +1466,7 @@ pub async fn xllm_fetch(
             debug_http_status: Some(user_status),
             debug_resp_keys: None,
             debug_message: Some(format!("HTTP {}", user_status)),
+            renewed_token: None,
         });
     }
 
@@ -1171,6 +1519,7 @@ pub async fn xllm_fetch(
         debug_http_status: Some(user_status),
         debug_resp_keys: None,
         debug_message: None,
+        renewed_token: None,
     })
 }
 

@@ -1,7 +1,12 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
+
+/// settings.json 全局读写锁：悬浮窗续期写 token、设置页保存、切站等并发操作串行化，
+/// 避免"读-改-写"交错导致字段被旧数据覆盖。
+static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
 // 单个中转站配置
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -14,6 +19,9 @@ pub struct StationProfile {
     pub cookie: String,
     pub api_token: String,
     pub new_api_user: String,
+    /// 极智自动登录账号（明文存 settings；密码存 Windows 凭据管理器）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jizhi_username: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -57,6 +65,7 @@ impl Default for AppSettings {
             cookie: String::new(),
             api_token: String::new(),
             new_api_user: String::new(),
+            jizhi_username: None,
         };
         let active = mock.id.clone();
         Self {
@@ -108,10 +117,22 @@ fn history_path(app: &AppHandle, profile_id: &str) -> PathBuf {
 
 pub fn read_settings(app: &AppHandle) -> AppSettings {
     let path = settings_path(app);
-    let mut settings = fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<AppSettings>(&s).ok())
-        .unwrap_or_default();
+    let mut settings = match fs::read_to_string(&path) {
+        Ok(s) => match serde_json::from_str::<AppSettings>(&s) {
+            Ok(v) => v,
+            Err(_) => {
+                // 文件损坏（多为并发写入历史遗留）：备份损坏文件再降级默认值，
+                // 避免静默用全新配置覆盖（profile_id 变了会让凭据管理器里的密码对不上号）
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let _ = fs::rename(&path, path.with_extension(format!("json.corrupt-{}", ts)));
+                AppSettings::default()
+            }
+        },
+        Err(_) => AppSettings::default(),
+    };
 
     // 迁移旧格式：profiles 为空且存在旧顶层字段
     if settings.profiles.is_empty() && settings.provider_type.is_some() {
@@ -123,6 +144,7 @@ pub fn read_settings(app: &AppHandle) -> AppSettings {
             cookie: settings.cookie.take().unwrap_or_default(),
             api_token: settings.api_token.take().unwrap_or_default(),
             new_api_user: settings.new_api_user.take().unwrap_or_default(),
+            jizhi_username: None,
         };
         let legacy_id = legacy.id.clone();
 
@@ -167,8 +189,27 @@ pub fn write_settings(app: &AppHandle, settings: &AppSettings) {
         let _ = fs::create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_string_pretty(settings) {
-        let _ = fs::write(path, json);
+        // 原子写：先写临时文件再 rename 覆盖，读者不会读到写了一半的 JSON
+        let tmp = path.with_extension("json.tmp");
+        if fs::write(&tmp, json).is_ok() {
+            let _ = fs::rename(&tmp, &path);
+        }
     }
+}
+
+/// 锁内执行一次"读 settings → 修改 → 写回"，所有局部改字段的场景都必须走这里，
+/// 防止与设置页全量保存、其他窗口的修改互相覆盖。
+pub fn update_settings<F: FnOnce(&mut AppSettings)>(app: &AppHandle, f: F) {
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = read_settings(app);
+    f(&mut s);
+    write_settings(app, &s);
+}
+
+/// 锁内全量写入设置（设置页"保存设置"用）
+pub fn write_settings_locked(app: &AppHandle, settings: &AppSettings) {
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    write_settings(app, settings);
 }
 
 pub fn read_history(app: &AppHandle, profile_id: &str) -> Vec<BalanceRecord> {

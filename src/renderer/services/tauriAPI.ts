@@ -36,6 +36,13 @@ export interface XiaomaSnapshot {
   debugHttpStatus: number | null
   debugRespKeys: string | null
   debugMessage: string | null
+  // 自动续期：账密重新登录成功后携带新 token
+  renewedToken?: string
+}
+
+export interface JizhiLoginResult {
+  tokenMasked: string
+  balance: number
 }
 
 export const tauriAPI = {
@@ -108,12 +115,36 @@ export const tauriAPI = {
   jizhiNewFetch: (
     baseUrl: string,
     bearerToken: string,
+    profileId: string,
     debugMode: boolean,
   ) => invoke<XiaomaSnapshot>('jizhi_new_fetch', {
     baseUrl,
     bearerToken,
+    profileId,
     debugMode,
   }),
+
+  // ── 极智账密登录（密码存 Windows 凭据管理器）──
+  jizhiSavePassword: (profileId: string, password: string) =>
+    invoke<void>('jizhi_save_password', { profileId, password }),
+  jizhiLogin: (
+    profileId: string,
+    baseUrl: string,
+    username: string,
+    password: string,
+    debugMode: boolean,
+  ) => invoke<JizhiLoginResult>('jizhi_login', {
+    profileId,
+    baseUrl,
+    username,
+    password,
+    debugMode,
+  }),
+  updateProfileToken: (profileId: string, token: string) =>
+    invoke<void>('update_profile_token', { profileId, token }),
+  // 切换当前监控的中转站（Rust 侧只改 activeProfileId，避免用旧数据覆盖设置）
+  setActiveProfile: (profileId: string) =>
+    invoke<void>('set_active_profile', { profileId }),
 
   // ── X网站 API 代理（x-llm.net）──
   xllmFetch: (
